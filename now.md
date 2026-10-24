@@ -132,9 +132,20 @@ cargo build -p game
 
 ## 9. Open items
 
-- [ ] Run `rustup update stable` and confirm rustc ≥ 1.97.1.
-- [ ] Create the workspace and both crates.
-- [ ] Get `cargo build -p game` to open an empty window.
-- [ ] Add the first determinism test in `sim`.
-- [ ] Add the headless benchmark scaffold.
-- [ ] Commit to git (initialize the repo first; `git init` has not been run yet).
+- [x] Run `rustup update stable` and confirm rustc ≥ 1.97.1. (rustc 1.99.1)
+- [x] Create the workspace and both crates. (Bevy 0.20.0 resolved)
+- [x] Get `cargo build -p game` to open an empty window. (Builds; runs 8s on X11 without error. Not visually checked.)
+- [x] Add the first determinism test in `sim`. (`determinism_same_seed_same_hash`)
+- [x] Add the headless benchmark scaffold. (`crates/game/examples/headless_bench.rs`)
+- [x] Commit to git. (`git init` done; first commit `7707b20`)
+
+## 10. Baseline
+
+Headless benchmark, release build, 10,000 tiles, 1,000 ticks:
+
+```
+cargo run -p game --example headless_bench --release -- 1000
+```
+
+- Result: **~26,600 ticks/s** (`elapsed=0.038s`, Pcg64Mcg, 16.16 fixed-point)
+- This is the first performance target. Re-measure after changes.
