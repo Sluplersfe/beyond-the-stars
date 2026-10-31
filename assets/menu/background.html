@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rotating Earth</title>
+<style>
+  :root { --void: #02030a; color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--void); overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #nogl[hidden] { display: none; }
+  #nogl {
+    position: fixed; inset: 0; display: grid; place-items: center; padding: 24px;
+    text-align: center; color: #a4b0d8; font: 15px/1.5 system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Rotating Earth"></canvas>
+<div id="nogl" hidden>This view needs WebGL, which this browser is not providing.</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const VERT = `
+    attribute vec2 aPos;
+    void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }
+  `;
+
+  const FRAG = `
+    precision highp float;
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform float uSpin;
+
+    float hash(vec3 p){
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+    float noise(vec3 x){
+      vec3 i = floor(x);
+      vec3 f = fract(x);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(
+        mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
+            mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+        mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+            mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y),
+        f.z);
+    }
+    const mat3 M3 = mat3(0.00,0.80,0.60,-0.80,0.36,-0.48,-0.60,-0.48,0.64);
+    float fbm(vec3 p){
+      float a = 0.5, s = 0.0;
+      for (int i = 0; i < 6; i++){ s += a * noise(p); p = M3 * p * 2.03; a *= 0.5; }
+      return s;
+    }
+    float fbm3(vec3 p){
+      float a = 0.5, s = 0.0;
+      for (int i = 0; i < 3; i++){ s += a * noise(p); p = M3 * p * 2.03; a *= 0.5; }
+      return s;
+    }
+
+    vec3 toSurface(vec3 n, float a){
+      float ca = cos(a), sa = sin(a);
+      vec3 q = vec3(ca * n.x + sa * n.z, n.y, -sa * n.x + ca * n.z);
+      float ct = cos(0.409), st = sin(0.409);
+      return vec3(q.x, ct * q.y - st * q.z, st * q.y + ct * q.z);
+    }
+
+    float elevation(vec3 q){
+      vec3 w = q + 0.35 * vec3(fbm3(q * 1.6 + 7.0), fbm3(q * 1.6 + 3.0), fbm3(q * 1.6 + 11.0));
+      float e = fbm(w * 1.9 + vec3(3.0));
+      float ridge = 1.0 - abs(fbm3(q * 6.0) * 2.0 - 1.0);
+      return e + (ridge - 0.5) * 0.07;
+    }
+    float clouds(vec3 q, float t){
+      vec3 w = q * 3.4 + vec3(t * 0.010, 0.0, t * 0.004);
+      w += 0.9 * vec3(fbm3(w * 1.1 + 1.0), fbm3(w * 1.1 + 5.0), fbm3(w * 1.1 + 8.0));
+      float c = fbm(w + vec3(4.0));
+      float band = 0.75 + 0.25 * cos(q.y * 9.0);
+      return smoothstep(0.52, 0.80, c * band + 0.02) * 0.92;
+    }
+
+    vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+
+    void main(){
+      float minDim = min(uRes.x, uRes.y);
+      vec2 p = (gl_FragCoord.xy - 0.5 * uRes) / (0.36 * minDim);
+      vec2 uv = gl_FragCoord.xy / uRes;
+      float px = 1.0 / (0.36 * minDim);
+      vec3 ro = vec3(0.0, 0.0, 5.0);
+      vec3 rd = normalize(vec3(p, -4.9));
+      vec3 L = normalize(vec3(-0.8, 0.32, 0.5));
+      vec3 sunCol = vec3(1.0, 0.95, 0.88);
+      float r = length(p);
+
+      vec3 bg = vec3(0.0015, 0.002, 0.005);
+      float neb = fbm3(rd * 2.2 + 9.0);
+      bg += vec3(0.020, 0.010, 0.035) * smoothstep(0.45, 0.8, neb);
+      bg += vec3(0.004, 0.014, 0.022) * smoothstep(0.5, 0.85, fbm3(rd * 3.1 + 2.0));
+      for (int k = 0; k < 2; k++){
+        float sc = k == 0 ? 180.0 : 420.0;
+        vec3 cell = floor(rd * sc);
+        float hv = hash(cell + float(k) * 13.0);
+        if (hv > (k == 0 ? 0.993 : 0.985)) {
+          vec3 c = (cell + 0.5 + (vec3(hash(cell+1.), hash(cell+2.), hash(cell+3.)) - 0.5) * 0.6) / sc;
+          float d = length(normalize(c) - rd) * sc;
+          float b = pow(hash(cell + 9.0), 8.0) * (k == 0 ? 2.0 : 0.5) + 0.05;
+          float tw = 0.75 + 0.25 * sin(uTime * (1.0 + hv * 3.0) + hv * 60.0);
+          vec3 tint = mix(vec3(1.0, 0.8, 0.6), vec3(0.7, 0.82, 1.0), hash(cell + 5.0));
+          bg += tint * b * tw * exp(-d * d * 16.0);
+        }
+      }
+
+      vec2 sd2 = normalize(p + 1e-5);
+      float sunSide = dot(vec3(sd2, 0.0), L) * 0.5 + 0.5;
+      float halo = exp(-max(r - 1.0, 0.0) * 22.0) * 0.55 + exp(-max(r - 1.0, 0.0) * 6.0) * 0.08;
+      vec3 haloCol = mix(vec3(0.10, 0.28, 0.75), vec3(0.35, 0.65, 1.0), sunSide);
+      vec3 outside = bg + haloCol * halo * (0.15 + 1.1 * sunSide * sunSide);
+
+      float b = dot(ro, rd);
+      float c = dot(ro, ro) - 1.0;
+      float h = b * b - c;
+      vec3 col = outside;
+
+      if (h > 0.0) {
+        float t = -b - sqrt(h);
+        vec3 n = normalize(ro + rd * t);
+        float a = uTime * uSpin;
+        vec3 q = toSurface(n, a);
+
+        float e = elevation(q);
+        vec3 tx = normalize(cross(n, vec3(0.0, 1.0, 0.0)) + 1e-4);
+        vec3 ty = cross(tx, n);
+        float eps = 0.004;
+        float ex = elevation(toSurface(normalize(n + tx * eps), a));
+        float ey = elevation(toSurface(normalize(n + ty * eps), a));
+        float sea = 0.56;
+        float land = smoothstep(sea, sea + 0.008, e);
+        float reliefK = land * 2.2;
+        vec3 N = normalize(n - (tx * (ex - e) + ty * (ey - e)) / eps * 0.018 * reliefK);
+
+        float lat = abs(q.y);
+        float moist = fbm3(q * 3.0 + 11.0) + 0.08 + (0.5 - abs(lat - 0.28) * 1.2) * 0.25;
+        float hgt = smoothstep(sea, 0.78, e);
+        vec3 desert = vec3(0.46, 0.34, 0.20);
+        vec3 savanna = vec3(0.30, 0.30, 0.14);
+        vec3 forest = vec3(0.10, 0.24, 0.09);
+        vec3 jungle = vec3(0.06, 0.20, 0.07);
+        vec3 tundra = vec3(0.38, 0.36, 0.30);
+        vec3 rock = vec3(0.34, 0.29, 0.25);
+        vec3 ground = mix(desert, savanna, smoothstep(0.38, 0.52, moist));
+        ground = mix(ground, forest, smoothstep(0.52, 0.66, moist));
+        ground = mix(ground, jungle, smoothstep(0.6, 0.75, moist) * (1.0 - smoothstep(0.2, 0.4, lat)));
+        ground = mix(ground, tundra, smoothstep(0.55, 0.72, lat));
+        ground = mix(ground, rock, smoothstep(0.35, 0.7, hgt));
+        ground = mix(ground, vec3(0.85), smoothstep(0.9, 0.98, hgt) * 0.7);
+        ground *= 0.85 + 0.3 * fbm3(q * 30.0);
+
+        float depth = smoothstep(sea - 0.12, sea, e);
+        vec3 ocean = mix(vec3(0.004, 0.025, 0.09), vec3(0.01, 0.11, 0.20), depth);
+        ocean = mix(ocean, vec3(0.03, 0.30, 0.34), smoothstep(sea - 0.015, sea, e) * 0.8);
+        vec3 albedo = mix(ocean, ground, land);
+
+        float ice = smoothstep(0.78, 0.9, lat + (fbm3(q * 6.0) - 0.5) * 0.22);
+        albedo = mix(albedo, vec3(0.88, 0.92, 0.97), ice);
+        N = normalize(mix(N, n, ice));
+
+        float ndl = dot(N, L);
+        float gndl = dot(n, L);
+        float diff = max(ndl, 0.0);
+        float dayMask = smoothstep(-0.08, 0.15, gndl);
+        vec3 light = mix(vec3(1.0, 0.45, 0.2), sunCol, smoothstep(0.0, 0.35, gndl)) * 1.35;
+
+        float cl = clouds(q, uTime);
+        vec3 qs = toSurface(normalize(n - L * 0.012), a);
+        float shadow = clouds(qs, uTime);
+
+        vec3 surf = albedo * (light * diff * (1.0 - shadow * 0.55));
+        surf += albedo * vec3(0.01, 0.015, 0.03);
+
+        vec3 V = -rd;
+        vec3 H = normalize(L + V);
+        float wave = (fbm3(q * 60.0 + uTime * 0.05) - 0.5) * 0.15;
+        float nh = max(dot(normalize(n + wave * tx), H), 0.0);
+        float fres = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+        float glint = (pow(nh, 300.0) * 3.0 + pow(nh, 40.0) * 0.25) * (1.0 - land) * (1.0 - ice);
+        surf += light * glint * (1.0 - cl) * (1.0 - shadow * 0.8) * dayMask;
+        surf += vec3(0.25, 0.45, 0.8) * fres * 0.15 * (1.0 - land) * dayMask;
+
+        vec3 cloudCol = vec3(1.0) * light * (0.12 + 0.95 * max(gndl, 0.0)) + vec3(0.01, 0.015, 0.03);
+        surf = mix(surf, cloudCol, cl);
+
+        float coast = 1.0 - smoothstep(0.0, 0.06, e - sea);
+        float cityMask = smoothstep(0.62, 0.8, fbm(q * 16.0 + 2.0)) * land * (1.0 - ice) * (0.4 + 0.6 * coast) * (1.0 - hgt);
+        float sparkle = smoothstep(0.55, 0.9, noise(q * 260.0));
+        surf += vec3(1.0, 0.62, 0.28) * cityMask * (0.35 + sparkle) * (1.0 - dayMask) * (1.0 - cl * 0.85) * 0.9;
+
+        float mu = max(dot(n, V), 0.0);
+        float airmass = pow(1.0 - mu, 2.2);
+        float scatterLit = smoothstep(-0.25, 0.4, gndl);
+        vec3 rayleigh = vec3(0.18, 0.42, 1.0) * (0.015 + airmass * 0.8) * scatterLit;
+        float dusk = exp(-gndl * gndl * 40.0) * smoothstep(-0.2, 0.05, gndl);
+        surf = surf * (1.0 - airmass * 0.35) + rayleigh * 0.9 + vec3(1.0, 0.35, 0.12) * dusk * airmass * 0.5;
+
+        float edge = smoothstep(1.0, 1.0 - 2.0 * px, r);
+        col = mix(outside, surf, edge);
+      }
+
+      vec2 sunScreen = vec2(-1.9, 1.1);
+      float g = exp(-length(p - sunScreen) * 1.1);
+      col += vec3(1.0, 0.75, 0.5) * g * 0.06;
+
+      col = aces(col * 1.1);
+      col = pow(col, vec3(1.0 / 2.2));
+      vec2 vc = uv - 0.5;
+      col *= 1.0 - dot(vc, vc) * 0.7;
+      col += (hash(vec3(gl_FragCoord.xy, fract(uTime) * 7.0)) - 0.5) / 255.0;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  const canvas = document.getElementById('c');
+  const noGl = document.getElementById('nogl');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const gl = canvas.getContext('webgl', { antialias: true, premultipliedAlpha: false }) ||
+             canvas.getContext('experimental-webgl');
+  if (!gl) { noGl.hidden = false; return; }
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  let prog;
+  try {
+    prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  } catch (e) {
+    noGl.hidden = false;
+    noGl.textContent = 'The Earth view could not start: ' + e.message;
+    return;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uRes = gl.getUniformLocation(prog, 'uRes');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uSpin = gl.getUniformLocation(prog, 'uSpin');
+
+  const SPIN = reduce ? 0.015 : 0.04;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+  }
+  addEventListener('resize', resize);
+  resize();
+  gl.uniform1f(uSpin, SPIN);
+
+  const t0 = performance.now();
+  function frame(now) {
+    gl.uniform1f(uTime, (now - t0) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
