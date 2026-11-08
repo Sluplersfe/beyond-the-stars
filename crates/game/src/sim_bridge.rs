@@ -13,7 +13,12 @@ impl Plugin for SimBridgePlugin {
         app.init_resource::<CommandQueue>()
             .init_resource::<MessageLog>()
             .init_resource::<GenerationOverlay>()
-            .add_systems(Update, drain_events.after(crate::time_control::SimStep));
+            .add_systems(
+                Update,
+                drain_events
+                    .after(crate::time_control::SimStep)
+                    .after(crate::net::MpStep),
+            );
     }
 }
 
@@ -24,13 +29,9 @@ pub fn apply_all(
     sfx: &mut SfxQueue,
 ) {
     for cmd in queue.0.drain(..) {
-        let is_build = matches!(
-            cmd,
-            sim::Command::Place { .. } | sim::Command::Remove { .. }
-        );
+        let sound = command_sound(&cmd);
         match sim.apply(cmd) {
-            Ok(()) if is_build => sfx.0.push(Sfx::Build),
-            Ok(()) => {}
+            Ok(()) => sfx.0.extend(sound),
             // Dragging the remove tool over empty ground is not worth a message.
             Err(e) if e == "Nothing to remove" => {}
             Err(e) => {
@@ -39,6 +40,36 @@ pub fn apply_all(
             }
         }
     }
+}
+
+/// The sound a successfully applied command makes.
+pub(crate) fn command_sound(cmd: &sim::Command) -> Option<Sfx> {
+    use sim::Command as C;
+    Some(match cmd {
+        C::Place {
+            what: sim::Placeable::Belt(_),
+            ..
+        } => Sfx::Belt,
+        C::Place { .. } => Sfx::Build,
+        C::Remove { .. } => Sfx::Demolish,
+        C::SelectResearch(_) => Sfx::ResearchStart,
+        C::Launch { .. } => Sfx::Launch,
+        C::SetRecipe { .. }
+        | C::SetFilter { .. }
+        | C::SetRateLimits { .. }
+        | C::InsertModule { .. }
+        | C::OrderShip { .. }
+        | C::Load { .. }
+        | C::Unload { .. }
+        | C::Board { .. }
+        | C::Disembark { .. }
+        | C::SetSurvey { .. }
+        | C::FoundColony { .. }
+        | C::ActivateColony { .. }
+        | C::SetRoute { .. }
+        | C::SetPolicy { .. }
+        | C::Ride { .. } => Sfx::Confirm,
+    })
 }
 
 const GEN_JOKES: [&str; 12] = [

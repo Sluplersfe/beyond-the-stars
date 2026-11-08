@@ -125,6 +125,7 @@ fn sync(
     session: Res<Session>,
     sim: Res<SimState>,
     tutorial: Res<Tutorial>,
+    net: Res<crate::net::Net>,
     time: Res<Time<Real>>,
     window: Single<(&Window, &RawHandleWrapper), With<PrimaryWindow>>,
     mut camera: Single<&mut Camera, With<MainCamera>>,
@@ -220,6 +221,8 @@ fn sync(
         session: &session,
         sim: &sim.0,
         tutorial_active: tutorial.active,
+        net: &net,
+        playing: false,
     });
     let page = menu_web::page_name(menu.page);
     let mut frame = menu_web::encode(page, web.version, &nodes);

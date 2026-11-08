@@ -36,6 +36,8 @@ pub struct Settings {
     pub master_volume: f32,
     /// 0..=1
     pub sfx_volume: f32,
+    /// 0..=1, the ambient score.
+    pub music_volume: f32,
     pub muted: bool,
     pub fullscreen: bool,
     pub vsync: bool,
@@ -51,6 +53,10 @@ pub struct Settings {
     /// Offer the tutorial when starting a new game.
     pub offer_tutorial: bool,
     pub show_fps: bool,
+    /// Last multiplayer server address, player name and the private key that marks rooms as yours.
+    pub mp_server: String,
+    pub mp_name: String,
+    pub mp_key: String,
 }
 
 impl Default for Settings {
@@ -58,6 +64,7 @@ impl Default for Settings {
         Self {
             master_volume: 0.8,
             sfx_volume: 0.8,
+            music_volume: 0.6,
             muted: false,
             fullscreen: false,
             vsync: true,
@@ -69,6 +76,9 @@ impl Default for Settings {
             autosave_minutes: 5,
             offer_tutorial: true,
             show_fps: false,
+            mp_server: String::new(),
+            mp_name: String::new(),
+            mp_key: String::new(),
         }
     }
 }
@@ -84,6 +94,7 @@ impl Settings {
         };
         self.master_volume = fix(self.master_volume, 0.0, 1.0, d.master_volume);
         self.sfx_volume = fix(self.sfx_volume, 0.0, 1.0, d.sfx_volume);
+        self.music_volume = fix(self.music_volume, 0.0, 1.0, d.music_volume);
         self.ui_scale = fix(self.ui_scale, 0.7, 1.5, 1.0);
         self.camera_speed = fix(self.camera_speed, 0.5, 2.0, 1.0);
         self.autosave_minutes = self.autosave_minutes.min(60);
@@ -96,6 +107,15 @@ impl Settings {
             0.0
         } else {
             self.master_volume * self.sfx_volume
+        }
+    }
+
+    /// Volume multiplier for the ambient music.
+    pub fn music_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            self.master_volume * self.music_volume
         }
     }
 
@@ -274,7 +294,15 @@ mod tests {
     fn muting_silences_effects() {
         let mut s = Settings::default();
         assert!(s.sfx_gain() > 0.0);
+        assert!(s.music_gain() > 0.0);
         s.muted = true;
         assert_eq!(s.sfx_gain(), 0.0);
+        assert_eq!(s.music_gain(), 0.0);
+    }
+
+    #[test]
+    fn old_files_get_a_music_volume() {
+        let s: Settings = serde_json::from_str(r#"{"sfx_volume": 0.5}"#).expect("parse");
+        assert_eq!(s.music_volume, Settings::default().music_volume);
     }
 }

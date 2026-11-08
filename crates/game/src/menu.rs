@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use sim::{HOME, Sim};
 
 use crate::camera::CameraRig;
+use crate::net::{self, MpHandoff, Net, Phase};
 use crate::save::{self, SaveEntry};
 use crate::settings::{AUTOSAVE_CHOICES, Settings};
 use crate::state::*;
@@ -33,10 +34,15 @@ impl Plugin for MenuPlugin {
                     autosave,
                 )
                     .chain()
+                    .in_set(MenuSystems)
                     .after(crate::input::GlobalKeys),
             );
     }
 }
+
+/// The menu systems, so multiplayer can order itself after them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuSystems;
 
 /// Which top-level screen the player is on. The sim keeps running behind `Playing` only.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,18 +58,27 @@ pub enum Page {
     Load,
     Settings,
     Pause,
+    Multiplayer,
+    CreateRoom,
+    HostWorld,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldId {
     Name,
     Seed,
+    Server,
+    PlayerName,
+    RoomName,
+    RoomPass,
+    Chat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Master(i8),
     Sfx(i8),
+    Music(i8),
     Muted,
     Fullscreen,
     Vsync,
@@ -104,6 +119,23 @@ pub enum MenuAction {
     Tutorial,
     ToMain,
     Quit,
+    MpConnect,
+    MpDisconnect,
+    MpRefresh,
+    MpCreate,
+    MpMax(i8),
+    /// Open the running single-player game as a room.
+    MpHostCurrent,
+    /// Open a saved game as a room.
+    MpHost(String),
+    MpJoin(String),
+    MpDelete(String),
+    /// A joined room's sim is ready in `MpHandoff`.
+    MpBegin,
+    /// The connection dropped mid-game.
+    MpLost(String),
+    ChatOpen,
+    ChatSend,
     Set(Setting),
     /// Tutorial card buttons.
     Guide(crate::tutorial::GuideAction),
@@ -146,6 +178,12 @@ pub struct MenuState {
     /// Slot waiting for delete confirmation.
     pub confirm: Option<String>,
     pub notice: Option<String>,
+    pub mp_server: String,
+    pub mp_name: String,
+    pub room_name: String,
+    pub room_pass: String,
+    pub room_max: u32,
+    pub chat: String,
     was_paused: bool,
     /// The HTML overlay is drawing the menu instead of the native UI.
     pub web: bool,
@@ -165,6 +203,12 @@ impl MenuState {
             load_page: 0,
             confirm: None,
             notice: None,
+            mp_server: String::new(),
+            mp_name: String::new(),
+            room_name: String::new(),
+            room_pass: String::new(),
+            room_max: 4,
+            chat: String::new(),
             was_paused: false,
             web: false,
         }
@@ -180,7 +224,7 @@ impl MenuState {
 
 /// Run condition: the game world accepts input (no menu covering it).
 pub fn gameplay(menu: Res<MenuState>) -> bool {
-    !menu.open
+    !menu.open && menu.focus != Some(FieldId::Chat)
 }
 
 pub const TUTORIAL_SEED: u64 = 1;
@@ -197,6 +241,20 @@ pub fn seed_from_text(s: &str) -> u64 {
             (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
         })
     })
+}
+
+/// Full-range random number for identifiers (not gameplay).
+fn random_seed_u64() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    let mut x = nanos ^ ((std::process::id() as u64) << 32) ^ 0x9e37_79b9_7f4a_7c15;
+    for _ in 0..3 {
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    }
+    x ^ (x >> 29)
 }
 
 pub fn random_seed() -> u64 {
@@ -243,6 +301,9 @@ pub struct MenuView<'a> {
     pub session: &'a Session,
     pub sim: &'a Sim,
     pub tutorial_active: bool,
+    pub net: &'a Net,
+    /// A single-player game is running behind the menu.
+    pub playing: bool,
 }
 
 /// What the menu layer should show. Empty when no menu is open.
@@ -256,6 +317,9 @@ pub fn content(v: &MenuView) -> Vec<UiNode> {
         Page::Load => load_page(v),
         Page::Settings => settings_page(v),
         Page::Pause => pause_page(v),
+        Page::Multiplayer => multiplayer_page(v),
+        Page::CreateRoom => create_room_page(v),
+        Page::HostWorld => host_world_page(v),
     }
 }
 
@@ -302,6 +366,7 @@ fn main_page(v: &MenuView) -> Vec<UiNode> {
             MenuAction::Open(Page::Load),
         ),
         big("Tutorial", "a guided first colony", MenuAction::Tutorial),
+        big("Multiplayer", "play with friends", MenuAction::Open(Page::Multiplayer)),
         big("Settings", "", MenuAction::Open(Page::Settings)),
         big("Quit", "", MenuAction::Quit),
     ]);
@@ -312,6 +377,9 @@ fn main_page(v: &MenuView) -> Vec<UiNode> {
 }
 
 fn pause_page(v: &MenuView) -> Vec<UiNode> {
+    if v.net.in_game() {
+        return mp_pause_page(v);
+    }
     let mut items = vec![
         title("Paused"),
         UiNode::dim(format!("{} - {}", v.session.name, fmt_ticks(v.sim.tick()))),
@@ -319,6 +387,7 @@ fn pause_page(v: &MenuView) -> Vec<UiNode> {
         primary("Resume", "Esc", MenuAction::Resume),
         big("Save Game", "F5", MenuAction::SaveNow),
         big("Load Game", "", MenuAction::Open(Page::Load)),
+        big("Multiplayer", "host this world or join one", MenuAction::Open(Page::Multiplayer)),
         big("Settings", "", MenuAction::Open(Page::Settings)),
         big(
             "Tutorial",
@@ -337,6 +406,244 @@ fn pause_page(v: &MenuView) -> Vec<UiNode> {
         left: false,
         items: vec![UiNode::Panel {
             width: 460.0,
+            items,
+        }],
+    }]
+}
+
+fn field(id: FieldId, value: &str, hint: &str, v: &MenuView) -> UiNode {
+    UiNode::Field {
+        id,
+        value: value.to_string(),
+        hint: hint.into(),
+        focused: v.menu.focus == Some(id),
+    }
+}
+
+fn mp_pause_page(v: &MenuView) -> Vec<UiNode> {
+    let room = v.net.room.as_ref().map(|r| r.name.as_str()).unwrap_or("Room");
+    let mut items = vec![
+        title("Multiplayer"),
+        UiNode::dim(format!(
+            "{room} - {} - the game keeps running",
+            fmt_ticks(v.sim.tick())
+        )),
+        UiNode::Gap,
+        primary("Resume", "Esc", MenuAction::Resume),
+        UiNode::dim(format!(
+            "Online: {}",
+            v.net
+                .players
+                .iter()
+                .map(|(id, n)| if *id == v.net.you { format!("{n} (you)") } else { n.clone() })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        big("Settings", "", MenuAction::Open(Page::Settings)),
+        big("Leave Server", "back to the main menu", MenuAction::ToMain),
+        big("Quit Game", "", MenuAction::Quit),
+    ];
+    items.extend(notice(v));
+    vec![UiNode::Overlay {
+        left: false,
+        items: vec![UiNode::Panel {
+            width: 460.0,
+            items,
+        }],
+    }]
+}
+
+fn multiplayer_page(v: &MenuView) -> Vec<UiNode> {
+    let m = v.menu;
+    let n = v.net;
+    let mut items = vec![title("Multiplayer")];
+    match n.phase {
+        Phase::Offline | Phase::Connecting => {
+            items.extend([
+                UiNode::dim("Server address"),
+                field(FieldId::Server, &m.mp_server, net::DEFAULT_SERVER, v),
+                UiNode::dim("Your name"),
+                field(FieldId::PlayerName, &m.mp_name, "Player", v),
+                UiNode::Gap,
+            ]);
+            if n.phase == Phase::Connecting {
+                items.push(UiNode::dim("Connecting..."));
+                items.push(big("Cancel", "", MenuAction::MpDisconnect));
+            } else {
+                items.push(primary("Connect", "", MenuAction::MpConnect));
+            }
+        }
+        _ => {
+            items.push(UiNode::dim(format!(
+                "Connected as {} - {} room(s)",
+                n.name,
+                n.rooms.len()
+            )));
+            items.push(UiNode::dim("Password for locked rooms"));
+            items.push(field(FieldId::RoomPass, &m.room_pass, "none", v));
+            if n.rooms.is_empty() {
+                items.push(UiNode::dim("No rooms yet. Create the first one."));
+            }
+            let mut cards = vec![];
+            for r in &n.rooms {
+                let full = r.players >= r.max;
+                let lock = if r.locked { "locked | " } else { "" };
+                let speed = if r.paused {
+                    "paused".to_string()
+                } else {
+                    format!("{}x", r.speed)
+                };
+                let mut buttons = vec![UiNode::Button(
+                    if full { "Full".into() } else { "Join".into() },
+                    UiAction::Menu(MenuAction::MpJoin(r.id.clone())),
+                    if full { Btn::Disabled } else { Btn::Active },
+                )];
+                buttons.push(small("Delete", MenuAction::MpDelete(r.id.clone())));
+                cards.push(UiNode::Card(
+                    vec![
+                        UiNode::Spread(vec![
+                            UiNode::sized(r.name.clone(), HEAD, 16.0),
+                            UiNode::Row(buttons),
+                        ]),
+                        UiNode::dim(format!(
+                            "{lock}{}/{} players | {} played | {speed} | seed {}",
+                            r.players,
+                            r.max,
+                            fmt_ticks(r.tick),
+                            r.seed
+                        )),
+                    ],
+                    ACCENT,
+                ));
+            }
+            if !cards.is_empty() {
+                items.push(UiNode::Scroll {
+                    key: "mp-rooms",
+                    height: px(260),
+                    items: cards,
+                });
+            }
+            items.push(UiNode::Gap);
+            items.push(primary("Create Room", "a new world", MenuAction::Open(Page::CreateRoom)));
+            if v.playing {
+                items.push(big(
+                    "Host Current World",
+                    v.session.name.clone(),
+                    MenuAction::MpHostCurrent,
+                ));
+            }
+            items.push(big(
+                "Host a Saved World",
+                format!("{} saved", m.saves.len()),
+                MenuAction::Open(Page::HostWorld),
+            ));
+            items.push(UiNode::Row(vec![
+                small("Refresh", MenuAction::MpRefresh),
+                small("Disconnect", MenuAction::MpDisconnect),
+            ]));
+        }
+    }
+    items.push(big("Back", "Esc", MenuAction::Back));
+    items.extend(notice(v));
+    vec![UiNode::Overlay {
+        left: false,
+        items: vec![UiNode::Panel {
+            width: 620.0,
+            items,
+        }],
+    }]
+}
+
+fn create_room_page(v: &MenuView) -> Vec<UiNode> {
+    let m = v.menu;
+    let mut items = vec![
+        title("Create Room"),
+        UiNode::dim("Room name"),
+        field(FieldId::RoomName, &m.room_name, "Our colony", v),
+        UiNode::dim("World seed (a number or any word; empty = random)"),
+        UiNode::Row(vec![
+            UiNode::Fixed(300.0, vec![field(FieldId::Seed, &m.seed, "random", v)]),
+            small("Randomize", MenuAction::RandomSeed),
+        ]),
+        UiNode::dim("Password (optional)"),
+        field(FieldId::RoomPass, &m.room_pass, "none", v),
+        UiNode::Row(vec![
+            UiNode::dim(format!("Max players: {}", m.room_max)),
+            small("-", MenuAction::MpMax(-1)),
+            small("+", MenuAction::MpMax(1)),
+        ]),
+        UiNode::Gap,
+        primary("Create", "", MenuAction::MpCreate),
+        big("Back", "Esc", MenuAction::Back),
+    ];
+    items.extend(notice(v));
+    vec![UiNode::Overlay {
+        left: false,
+        items: vec![UiNode::Panel {
+            width: 520.0,
+            items,
+        }],
+    }]
+}
+
+fn host_world_page(v: &MenuView) -> Vec<UiNode> {
+    let m = v.menu;
+    let mut items = vec![
+        title("Host a Saved World"),
+        UiNode::dim("Players join your world as it is now. The server keeps it afterwards."),
+        UiNode::dim("Password (optional)"),
+        field(FieldId::RoomPass, &m.room_pass, "none", v),
+        UiNode::Row(vec![
+            UiNode::dim(format!("Max players: {}", m.room_max)),
+            small("-", MenuAction::MpMax(-1)),
+            small("+", MenuAction::MpMax(1)),
+        ]),
+    ];
+    if m.saves.is_empty() {
+        items.push(UiNode::dim("No saved games yet."));
+    }
+    let pages = m.saves.len().div_ceil(SAVES_PER_PAGE).max(1);
+    let page = m.load_page.min(pages - 1);
+    for s in m.saves.iter().skip(page * SAVES_PER_PAGE).take(SAVES_PER_PAGE) {
+        let label = if s.is_autosave() {
+            format!("{} (autosave)", s.meta.name)
+        } else {
+            s.meta.name.clone()
+        };
+        items.push(UiNode::Card(
+            vec![
+                UiNode::Spread(vec![
+                    UiNode::sized(label, HEAD, 16.0),
+                    UiNode::Button(
+                        "Host".into(),
+                        UiAction::Menu(MenuAction::MpHost(s.slot.clone())),
+                        Btn::Active,
+                    ),
+                ]),
+                UiNode::dim(format!(
+                    "{} played | {} colonies | {} people | {}",
+                    fmt_ticks(s.meta.tick),
+                    s.meta.colonies,
+                    s.meta.population,
+                    save::ago(s.meta.saved_unix)
+                )),
+            ],
+            ACCENT,
+        ));
+    }
+    if pages > 1 {
+        items.push(UiNode::Row(vec![
+            small("< Prev", MenuAction::LoadPage(-1)),
+            UiNode::dim(format!("page {} / {pages}", page + 1)),
+            small("Next >", MenuAction::LoadPage(1)),
+        ]));
+    }
+    items.push(big("Back", "Esc", MenuAction::Back));
+    items.extend(notice(v));
+    vec![UiNode::Overlay {
+        left: false,
+        items: vec![UiNode::Panel {
+            width: 640.0,
             items,
         }],
     }]
@@ -498,6 +805,12 @@ fn settings_page(v: &MenuView) -> Vec<UiNode> {
             Some(s.sfx_volume),
             Setting::Sfx,
         ),
+        step(
+            "Music volume",
+            pct(s.music_volume),
+            Some(s.music_volume),
+            Setting::Music,
+        ),
         toggle("Mute all sound [F2]", s.muted, Setting::Muted),
         UiNode::Divider,
         UiNode::head("Display"),
@@ -562,6 +875,7 @@ pub fn apply_setting(s: &mut Settings, c: Setting) {
     match c {
         Setting::Master(d) => s.master_volume = nudge(s.master_volume, d, 0.1, 0.0, 1.0),
         Setting::Sfx(d) => s.sfx_volume = nudge(s.sfx_volume, d, 0.1, 0.0, 1.0),
+        Setting::Music(d) => s.music_volume = nudge(s.music_volume, d, 0.1, 0.0, 1.0),
         Setting::Muted => s.muted = !s.muted,
         Setting::Fullscreen => s.fullscreen = !s.fullscreen,
         Setting::Vsync => s.vsync = !s.vsync,
@@ -588,7 +902,20 @@ pub fn apply_setting(s: &mut Settings, c: Setting) {
 // Systems
 // ---------------------------------------------------------------------------------------
 
-fn menu_keys(keys: Res<ButtonInput<KeyCode>>, menu: Res<MenuState>, mut queue: ResMut<MenuQueue>) {
+fn menu_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    menu: Res<MenuState>,
+    net: Res<Net>,
+    mut queue: ResMut<MenuQueue>,
+) {
+    if keys.just_pressed(KeyCode::Escape) && menu.focus == Some(FieldId::Chat) {
+        queue.0.push(MenuAction::Cancel);
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) && net.in_game() && !menu.open && menu.focus.is_none() {
+        queue.0.push(MenuAction::ChatOpen);
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) && menu.open {
         queue
             .0
@@ -600,10 +927,39 @@ fn menu_keys(keys: Res<ButtonInput<KeyCode>>, menu: Res<MenuState>, mut queue: R
     }
 }
 
+/// The text a field edits and its length limit.
+fn field_buf(menu: &mut MenuState, f: FieldId) -> (&mut String, usize) {
+    match f {
+        FieldId::Name => (&mut menu.name, 24),
+        FieldId::Seed => (&mut menu.seed, 20),
+        FieldId::Server => (&mut menu.mp_server, 64),
+        FieldId::PlayerName => (&mut menu.mp_name, 20),
+        FieldId::RoomName => (&mut menu.room_name, 32),
+        FieldId::RoomPass => (&mut menu.room_pass, 32),
+        FieldId::Chat => (&mut menu.chat, 200),
+    }
+}
+
+/// The field Tab moves to from `f` on the current page.
+fn next_field(menu: &MenuState, net: &Net, f: FieldId) -> FieldId {
+    let ring: &[FieldId] = match menu.page {
+        Page::NewGame => &[FieldId::Name, FieldId::Seed],
+        Page::Multiplayer | Page::HostWorld if net.connected() => &[FieldId::RoomPass],
+        Page::Multiplayer => &[FieldId::Server, FieldId::PlayerName],
+        Page::CreateRoom => &[FieldId::RoomName, FieldId::Seed, FieldId::RoomPass],
+        _ => &[],
+    };
+    match ring.iter().position(|x| *x == f) {
+        Some(i) => ring[(i + 1) % ring.len()],
+        None => f,
+    }
+}
+
 /// Edits the focused text field from keyboard events.
 fn field_input(
     mut events: MessageReader<KeyboardInput>,
     mut menu: ResMut<MenuState>,
+    net: Res<Net>,
     mut queue: ResMut<MenuQueue>,
 ) {
     let Some(field) = menu.focus else {
@@ -614,31 +970,28 @@ fn field_input(
         if !e.state.is_pressed() {
             continue;
         }
-        let (buf, max, digits) = match field {
-            FieldId::Name => (&mut menu.name, 24usize, false),
-            FieldId::Seed => (&mut menu.seed, 20usize, false),
-        };
         match &e.logical_key {
             Key::Backspace => {
-                buf.pop();
+                field_buf(&mut menu, field).0.pop();
             }
             Key::Enter => {
-                queue.0.push(MenuAction::Cancel);
+                queue.0.push(match field {
+                    FieldId::Chat => MenuAction::ChatSend,
+                    FieldId::Server | FieldId::PlayerName if !net.connected() => {
+                        MenuAction::MpConnect
+                    }
+                    _ => MenuAction::Cancel,
+                });
             }
             Key::Tab => {
-                menu.focus = Some(match field {
-                    FieldId::Name => FieldId::Seed,
-                    FieldId::Seed => FieldId::Name,
-                });
+                menu.focus = Some(next_field(&menu, &net, field));
                 return;
             }
             _ => {
                 if let Some(t) = &e.text {
+                    let (buf, max) = field_buf(&mut menu, field);
                     for c in t.chars() {
-                        if !c.is_control()
-                            && buf.chars().count() < max
-                            && (!digits || c.is_ascii_digit())
-                        {
+                        if !c.is_control() && buf.chars().count() < max {
                             buf.push(c);
                         }
                     }
@@ -701,6 +1054,8 @@ fn handle_menu_actions(
     mut settings: ResMut<Settings>,
     mut tutorial: ResMut<Tutorial>,
     mut game: Game,
+    mut net: ResMut<Net>,
+    mut hand: ResMut<MpHandoff>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for a in std::mem::take(&mut queue.0) {
@@ -739,12 +1094,40 @@ fn handle_menu_actions(
                         menu.seed.clear();
                         menu.tutorial = settings.offer_tutorial;
                     }
+                    Page::Multiplayer => {
+                        menu.mp_server = if settings.mp_server.is_empty() {
+                            net::DEFAULT_SERVER.to_string()
+                        } else {
+                            settings.mp_server.clone()
+                        };
+                        menu.mp_name = settings.mp_name.clone();
+                        menu.room_pass.clear();
+                        if net.phase == Phase::Lobby {
+                            net.refresh();
+                        }
+                    }
+                    Page::HostWorld => {
+                        menu.saves = save::list();
+                        menu.load_page = 0;
+                    }
+                    Page::CreateRoom => {
+                        menu.room_name = if net.name.is_empty() {
+                            "Our colony".into()
+                        } else {
+                            format!("{}'s colony", net.name)
+                        };
+                        menu.seed.clear();
+                        menu.room_pass.clear();
+                    }
                     _ => {}
                 }
             }
             MenuAction::Back => {
                 menu.focus = None;
                 menu.confirm = None;
+                if menu.page == Page::Multiplayer && !net.in_game() {
+                    net.disconnect();
+                }
                 match menu.stack.pop() {
                     Some(p) => menu.page = p,
                     None if *screen == Screen::Playing => close(&mut menu, &mut game),
@@ -752,14 +1135,17 @@ fn handle_menu_actions(
                 }
             }
             MenuAction::Cancel => {
+                if menu.focus == Some(FieldId::Chat) {
+                    menu.chat.clear();
+                }
                 menu.focus = None;
                 menu.confirm = None;
             }
             MenuAction::Focus(f) => menu.focus = Some(f),
-            MenuAction::SetField(f, v) => match f {
-                FieldId::Name => menu.name = v.chars().take(24).collect(),
-                FieldId::Seed => menu.seed = v.chars().take(20).collect(),
-            },
+            MenuAction::SetField(f, v) => {
+                let (buf, max) = field_buf(&mut menu, f);
+                *buf = v.chars().take(max).collect();
+            }
             MenuAction::RandomSeed => menu.seed = random_seed().to_string(),
             MenuAction::ToggleTutorial => menu.tutorial = !menu.tutorial,
             MenuAction::StartNew => {
@@ -804,7 +1190,7 @@ fn handle_menu_actions(
                 &mut game,
             ),
             MenuAction::Reload => {
-                if *screen == Screen::Playing {
+                if *screen == Screen::Playing && !net.in_game() {
                     let slot = session.slot.clone();
                     load_slot(
                         &slot,
@@ -832,6 +1218,10 @@ fn handle_menu_actions(
                 menu.load_page = (menu.load_page as i32 + d).clamp(0, pages - 1) as usize;
                 menu.confirm = None;
             }
+            MenuAction::SaveNow if net.in_game() => {
+                game.log
+                    .push(MsgKind::Info, "The server keeps the world: no local saves in multiplayer");
+            }
             MenuAction::SaveNow => {
                 if *screen == Screen::Playing {
                     let slot = session.slot.clone();
@@ -840,6 +1230,7 @@ fn handle_menu_actions(
                     menu.saves = save::list();
                 }
             }
+            MenuAction::Tutorial if net.in_game() => {}
             MenuAction::Tutorial => {
                 if *screen == Screen::Playing {
                     tutorial.start();
@@ -858,10 +1249,11 @@ fn handle_menu_actions(
                 }
             }
             MenuAction::ToMain => {
-                if *screen == Screen::Playing {
+                if *screen == Screen::Playing && !net.in_game() {
                     let slot = session.slot.clone();
                     write_save(&slot, &session, &tutorial, &mut game, false);
                 }
+                net.disconnect();
                 *screen = Screen::MainMenu;
                 menu.open = true;
                 menu.page = Page::Main;
@@ -871,11 +1263,124 @@ fn handle_menu_actions(
                 game.virt.unpause();
             }
             MenuAction::Quit => {
-                if *screen == Screen::Playing {
+                if *screen == Screen::Playing && !net.in_game() {
                     let slot = session.slot.clone();
                     write_save(&slot, &session, &tutorial, &mut game, false);
                 }
+                net.disconnect();
                 exit.write(AppExit::Success);
+            }
+            MenuAction::MpConnect => {
+                let mut addr = menu.mp_server.trim().to_string();
+                if addr.is_empty() {
+                    addr = net::DEFAULT_SERVER.into();
+                }
+                if !addr.contains(':') {
+                    addr.push_str(":4001");
+                }
+                let name = menu.mp_name.trim().to_string();
+                let name = if name.is_empty() { "Player".to_string() } else { name };
+                if settings.mp_key.is_empty() {
+                    settings.mp_key = format!("{:016x}{:016x}", random_seed_u64(), random_seed_u64());
+                }
+                settings.mp_server = addr.clone();
+                settings.mp_name = name.clone();
+                net.error = None;
+                net.connect(&addr, &name, &settings.mp_key);
+                menu.focus = None;
+            }
+            MenuAction::MpDisconnect => {
+                net.disconnect();
+                menu.focus = None;
+            }
+            MenuAction::MpRefresh => net.refresh(),
+            MenuAction::MpMax(d) => {
+                menu.room_max = (menu.room_max as i32 + d as i32).clamp(2, 16) as u32;
+            }
+            MenuAction::MpCreate => {
+                let name = menu.room_name.trim().to_string();
+                if name.is_empty() {
+                    menu.notice = Some("Give the room a name".into());
+                } else {
+                    let seed = seed_from_text(&menu.seed);
+                    net.create(&name, seed, &menu.room_pass, menu.room_max);
+                }
+            }
+            MenuAction::MpHostCurrent => {
+                if *screen == Screen::Playing && !net.in_game() && net.phase == Phase::Lobby {
+                    let slot = session.slot.clone();
+                    write_save(&slot, &session, &tutorial, &mut game, false);
+                    match game.sim.0.save().and_then(|b| Sim::load(&b)) {
+                        Ok(sim) => net.host(sim, &session.name, &menu.room_pass, menu.room_max),
+                        Err(e) => menu.notice = Some(format!("Could not open this world: {e}")),
+                    }
+                }
+            }
+            MenuAction::MpHost(slot) => {
+                if net.phase == Phase::Lobby {
+                    match save::read(&slot) {
+                        Ok((meta, sim)) => {
+                            net.host(sim, &meta.name, &menu.room_pass, menu.room_max)
+                        }
+                        Err(e) => menu.notice = Some(format!("Could not load '{slot}': {e}")),
+                    }
+                }
+            }
+            MenuAction::MpJoin(id) => net.join(&id, &menu.room_pass),
+            MenuAction::MpDelete(id) => net.delete(&id),
+            MenuAction::MpBegin => {
+                if let Some(sim) = hand.0.take() {
+                    game.begin(sim);
+                    game.speed.0 = net.speed;
+                    let name = net
+                        .room
+                        .as_ref()
+                        .map(|r| r.name.clone())
+                        .unwrap_or_else(|| "Multiplayer".into());
+                    *session = Session {
+                        slot: String::new(),
+                        name: name.clone(),
+                        manual_saves: 0,
+                    };
+                    tutorial.dismiss();
+                    *screen = Screen::Playing;
+                    menu.open = false;
+                    menu.stack.clear();
+                    menu.focus = None;
+                    menu.was_paused = false;
+                    game.log.push(
+                        MsgKind::Good,
+                        format!("Joined {name}. Press Enter to chat"),
+                    );
+                }
+            }
+            MenuAction::MpLost(why) => {
+                net.disconnect();
+                *screen = Screen::MainMenu;
+                menu.open = true;
+                menu.page = Page::Main;
+                menu.stack.clear();
+                menu.focus = None;
+                menu.notice = Some(if why.is_empty() {
+                    "Disconnected from the server".into()
+                } else {
+                    why
+                });
+                game.virt.unpause();
+            }
+            MenuAction::ChatOpen => {
+                if net.in_game() && !menu.open {
+                    menu.chat.clear();
+                    menu.focus = Some(FieldId::Chat);
+                }
+            }
+            MenuAction::ChatSend => {
+                let text = menu.chat.trim().to_string();
+                if !text.is_empty() {
+                    net.chat(&text);
+                }
+                menu.chat.clear();
+                menu.focus = None;
             }
             MenuAction::Set(c) => apply_setting(&mut settings, c),
             MenuAction::Guide(g) => tutorial.apply(g, &mut game.log),
@@ -1015,9 +1520,10 @@ fn autosave(
     tutorial: Res<Tutorial>,
     sim: Res<SimState>,
     mut log: ResMut<MessageLog>,
+    net: Res<Net>,
     mut since: Local<f32>,
 ) {
-    if *screen != Screen::Playing || menu.open || settings.autosave_minutes == 0 {
+    if *screen != Screen::Playing || menu.open || settings.autosave_minutes == 0 || net.in_game() {
         return;
     }
     *since += time.delta_secs();

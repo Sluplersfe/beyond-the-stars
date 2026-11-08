@@ -10,6 +10,7 @@ mod menu;
 mod menu_web;
 mod mesh_util;
 mod models;
+mod net;
 mod panels;
 mod paths;
 mod render;
@@ -79,6 +80,7 @@ fn main() {
         audio::SfxPlugin,
         sim_bridge::SimBridgePlugin,
         time_control::TimeControlPlugin,
+        net::NetPlugin,
         camera::CameraPlugin,
         input::InputPlugin,
         render::RenderPlugin,

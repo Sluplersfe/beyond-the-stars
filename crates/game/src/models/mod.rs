@@ -11,12 +11,19 @@ use sim::BuildingKind;
 
 use crate::mesh_util::*;
 
+#[allow(clippy::too_many_arguments)]
 mod colony;
+#[allow(clippy::too_many_arguments)]
 mod items;
+#[allow(clippy::too_many_arguments)]
 pub mod kit;
+#[allow(clippy::too_many_arguments)]
 mod logistics;
+#[allow(clippy::too_many_arguments)]
 mod nature;
+#[allow(clippy::too_many_arguments)]
 mod power;
+#[allow(clippy::too_many_arguments)]
 mod production;
 
 pub use colony::rocket;

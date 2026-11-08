@@ -17,7 +17,9 @@ use crate::icons::Icon;
 use crate::sim_bridge::planet_name;
 use crate::state::*;
 use crate::time_control::{SimRate, Speed};
-use crate::ui::{ACCENT, Btn, BuildCategory, CodexTab, DIM, PanelId, TEXT, UiAction, UiNode};
+use crate::ui::{
+    ACCENT, AMBER, Btn, BuildCategory, CodexTab, DIM, FAINT, HEAD, PanelId, TEXT, UiAction, UiNode,
+};
 
 #[derive(SystemParam)]
 pub struct PanelCtx<'w> {
@@ -46,15 +48,17 @@ pub struct PanelCtx<'w> {
     pub tutorial: Res<'w, crate::tutorial::Tutorial>,
     pub tech_tab: Res<'w, crate::ui::TechTab>,
     pub codex_tab: Res<'w, crate::ui::CodexTab>,
+    pub viewport: Res<'w, crate::ui::UiViewport>,
+    pub net: Res<'w, crate::net::Net>,
 }
 
-const GOOD: Color = Color::srgb(0.45, 0.95, 0.5);
-const WARN: Color = Color::srgb(1.0, 0.8, 0.3);
-const BAD: Color = Color::srgb(1.0, 0.4, 0.35);
-const INFO: Color = Color::srgb(0.6, 0.8, 1.0);
-const PURPLE: Color = Color::srgb(0.68, 0.48, 1.0);
-const POWER: Color = Color::srgb(0.35, 0.95, 0.55);
-const YELLOW: Color = Color::srgb(1.0, 0.82, 0.25);
+const GOOD: Color = Color::srgb(0.42, 0.94, 0.58);
+const WARN: Color = Color::srgb(1.0, 0.76, 0.3);
+const BAD: Color = Color::srgb(1.0, 0.42, 0.36);
+const INFO: Color = Color::srgb(0.58, 0.8, 1.0);
+const PURPLE: Color = Color::srgb(0.7, 0.5, 1.0);
+const POWER: Color = Color::srgb(0.36, 0.94, 0.6);
+const YELLOW: Color = Color::srgb(1.0, 0.8, 0.28);
 
 /// Galaxy minimap half-width, in galaxy-view world units.
 pub const GALAXY_MINIMAP_RADIUS: f32 = 70.0;
@@ -160,6 +164,8 @@ pub fn build(id: PanelId, ctx: &PanelCtx) -> Vec<UiNode> {
             session: &ctx.session,
             sim: &ctx.sim.0,
             tutorial_active: ctx.tutorial.active,
+            net: &ctx.net,
+            playing: *ctx.screen == crate::menu::Screen::Playing && !ctx.net.in_game(),
         });
     }
     if *ctx.screen != crate::menu::Screen::Playing {
@@ -211,10 +217,10 @@ fn rate_text(r: f32) -> (String, Color) {
 
 fn stat(icon: Icon, color: Color, value: String, sub: String, sub_color: Color) -> UiNode {
     UiNode::Row(vec![
-        UiNode::Icon(icon, color, 26.0),
+        UiNode::Badge(icon, color, 30.0),
         UiNode::Col(vec![
-            UiNode::sized(value, Color::WHITE, 16.0),
-            UiNode::sized(sub, sub_color, 11.0),
+            UiNode::sized(value, Color::WHITE, 15.0),
+            UiNode::sized(sub, sub_color, 10.5),
         ]),
     ])
 }
@@ -227,6 +233,8 @@ fn game_clock(tick: u64) -> String {
 fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let scope = scope_of(&ctx.view, sim);
+    let width = ctx.viewport.0.x;
+    let planet_view = matches!(*ctx.view, View::Planet(_));
     let (emblem, title, subtitle) = match *ctx.view {
         View::Planet(p) => {
             let planet = sim.planet(p);
@@ -241,12 +249,12 @@ fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
         }
         View::Map(level) => {
             let sub = match level {
-                MapLevel::Universe => "Intergalactic View".to_string(),
+                MapLevel::Universe => "Intergalactic view".to_string(),
                 MapLevel::Galaxy(g) => {
-                    format!("{} - Galaxy View", sim.universe.galaxies[g as usize].name)
+                    format!("{} - galaxy", sim.universe.galaxies[g as usize].name)
                 }
                 MapLevel::System(s) => format!(
-                    "{} - System View",
+                    "{} - system",
                     sim.universe
                         .system(s)
                         .map(|s| s.name.as_str())
@@ -261,72 +269,88 @@ fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
         View::Map(_) => MapLevel::Galaxy(sim.player.at.map(|p| p.galaxy).unwrap_or(0)),
     };
     let mut out = vec![UiNode::Row(vec![
-        UiNode::IconBtn(emblem, UiAction::ViewMap(map_level), Btn::Active, 30.0),
-        UiNode::Col(vec![
-            UiNode::sized(title, Color::srgb(0.55, 0.85, 1.0), 19.0),
-            UiNode::sized(subtitle, DIM, 12.0),
-        ]),
+        UiNode::IconBtn(emblem, UiAction::ViewMap(map_level), Btn::Primary, 26.0),
+        UiNode::Fixed(
+            150.0,
+            vec![
+                UiNode::Spaced(title.to_uppercase(), HEAD, 15.0),
+                UiNode::sized(subtitle, DIM, 11.0),
+            ],
+        ),
     ])];
 
-    // Resources with net rate per minute.
+    // Resources with net rate per minute; fewer on narrow screens.
+    let fixed = if planet_view { 1010.0 } else { 830.0 };
+    let slots = (((width - fixed) / 104.0).floor() as usize).clamp(2, 6);
     let (items, pop) = snapshot(sim, scope);
     let mut ranked: Vec<(Item, u32)> = items.into_iter().filter(|(_, n)| *n > 0).collect();
     ranked.sort_by_key(|(i, n)| (std::cmp::Reverse(*n), *i));
     let mut res: Vec<UiNode> = Vec::new();
-    for (i, n) in ranked.into_iter().take(6) {
+    for (i, n) in ranked.into_iter().take(slots) {
         let (r, c) = rate_text(ctx.rates.item_per_min(i));
-        res.push(stat(item_icon(i), item_color(i), fmt_num(n as f64), r, c));
+        res.push(UiNode::tip(
+            i.name(),
+            stat(item_icon(i), item_color(i), fmt_num(n as f64), r, c),
+        ));
     }
-    out.push(UiNode::Row(res));
+    if !res.is_empty() {
+        out.push(UiNode::Well(res));
+    }
     out.push(UiNode::Spacer);
 
     // Population and power.
     let (r, c) = rate_text(ctx.rates.pop_per_min());
-    out.push(stat(Icon::Person, INFO, pop.to_string(), r, c));
-    let (produced, demand, capacity, shortage) = sim
+    let (demand, capacity, shortage) = sim
         .colonies()
         .filter(|p| scope == crate::hud::Scope::Civ || Some(p.id) == ctx_planet(ctx))
         .filter_map(|p| p.colony.as_ref())
-        .fold((0i64, 0i64, 0i64, false), |a, c| {
+        .fold((0i64, 0i64, false), |a, c| {
             (
-                a.0 + c.power.produced as i64,
-                a.1 + c.power.demand as i64,
-                a.2 + c.power.capacity as i64,
-                a.3 || c.power.shortage,
+                a.0 + c.power.demand as i64,
+                a.1 + c.power.capacity as i64,
+                a.2 || c.power.shortage,
             )
         });
-    let _ = produced;
     let surplus = capacity - demand;
-    out.push(stat(
-        Icon::Bolt,
-        YELLOW,
-        fmt_kw(demand),
-        format!(
-            "{}{} spare",
-            if surplus >= 0 { "+" } else { "" },
-            fmt_kw(surplus)
+    out.push(UiNode::Well(vec![
+        UiNode::tip(
+            "Population",
+            stat(Icon::Person, INFO, pop.to_string(), r, c),
         ),
-        if shortage || surplus < 0 { BAD } else { GOOD },
-    ));
+        UiNode::tip(
+            "Power demand and spare capacity",
+            stat(
+                Icon::Bolt,
+                YELLOW,
+                fmt_kw(demand),
+                format!(
+                    "{}{} spare",
+                    if surplus >= 0 { "+" } else { "" },
+                    fmt_kw(surplus)
+                ),
+                if shortage || surplus < 0 { BAD } else { GOOD },
+            ),
+        ),
+    ]));
 
     // Quick navigation (planet view has no bottom nav bar).
-    if matches!(*ctx.view, View::Planet(_)) {
+    if planet_view {
         let w = ctx.window.0;
         let nav = |i: Icon, p: Popup| {
             UiNode::IconBtn(
                 i,
                 UiAction::OpenWindow(p),
-                if w == p { Btn::Active } else { Btn::Normal },
+                if w == p { Btn::Active } else { Btn::Flat },
                 18.0,
             )
         };
-        out.push(UiNode::Row(vec![
+        out.push(UiNode::Well(vec![UiNode::Row(vec![
             nav(Icon::Flask, Popup::Research),
             nav(Icon::Atom, Popup::TechTree),
             nav(Icon::Book, Popup::Codex),
             nav(Icon::Rocket, Popup::Ships),
             nav(Icon::Colony, Popup::Colonies),
-        ]));
+        ])]));
     }
 
     // Time controls.
@@ -334,25 +358,25 @@ fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
     let max = sim.research.max_speed();
     let speed = ctx.speed.0;
     let label = if ctx.warp.0.is_some() {
-        "Instant-Warp".to_string()
+        "INSTANT-WARP".to_string()
     } else if paused {
-        "Paused".to_string()
+        "PAUSED".to_string()
     } else if speed == 1 {
-        "Normal".to_string()
+        "NORMAL".to_string()
     } else {
         let eff = ctx.rate.effective();
         if eff > 1.0 && eff < speed as f32 * 0.75 {
-            format!("Fast {speed}x (~{:.0}x)", eff)
+            format!("{speed}x (~{:.0}x)", eff)
         } else {
-            format!("Fast {speed}x")
+            format!("FAST {speed}x")
         }
     };
-    out.push(UiNode::Row(vec![
+    out.push(UiNode::Well(vec![UiNode::Row(vec![
         UiNode::IconBtn(
             Icon::Pause,
             UiAction::TogglePause,
-            if paused { Btn::Danger } else { Btn::Normal },
-            18.0,
+            if paused { Btn::Danger } else { Btn::Flat },
+            16.0,
         ),
         UiNode::IconBtn(
             Icon::Play,
@@ -360,9 +384,9 @@ fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
             if !paused && speed == 1 {
                 Btn::Active
             } else {
-                Btn::Normal
+                Btn::Flat
             },
-            18.0,
+            16.0,
         ),
         UiNode::IconBtn(
             Icon::Fast,
@@ -372,21 +396,24 @@ fn top_bar(ctx: &PanelCtx) -> Vec<UiNode> {
             } else if !paused && speed > 1 {
                 Btn::Active
             } else {
-                Btn::Normal
+                Btn::Flat
             },
-            18.0,
+            16.0,
         ),
-        UiNode::Col(vec![
-            UiNode::sized(game_clock(sim.tick()), Color::WHITE, 15.0),
-            UiNode::sized(label, if paused { WARN } else { ACCENT }, 11.0),
-        ]),
-        UiNode::IconBtn(
-            Icon::Gear,
-            UiAction::OpenWindow(Popup::Help),
-            Btn::Normal,
-            20.0,
+        UiNode::Fixed(
+            78.0,
+            vec![
+                UiNode::Spaced(game_clock(sim.tick()), Color::WHITE, 14.0),
+                UiNode::sized(label, if paused { WARN } else { ACCENT }, 10.0),
+            ],
         ),
-    ]));
+    ])]));
+    out.push(UiNode::IconBtn(
+        Icon::Gear,
+        UiAction::OpenWindow(Popup::Help),
+        Btn::Normal,
+        18.0,
+    ));
     out
 }
 
@@ -400,8 +427,11 @@ fn ctx_planet(ctx: &PanelCtx) -> Option<PlanetId> {
 fn labeled_bar(icon: Icon, color: Color, label: &str, value: String, frac: f32) -> Vec<UiNode> {
     vec![
         UiNode::Spread(vec![
-            UiNode::Row(vec![UiNode::Icon(icon, color, 20.0), UiNode::text(label)]),
-            UiNode::sized(value, TEXT, 12.5),
+            UiNode::Row(vec![
+                UiNode::Badge(icon, color, 22.0),
+                UiNode::sized(label, TEXT, 12.5),
+            ]),
+            UiNode::sized(value, Color::WHITE, 12.5),
         ]),
         UiNode::Bar(frac, color),
         UiNode::Gap,
@@ -413,10 +443,7 @@ fn planet_overview(ctx: &PanelCtx) -> Vec<UiNode> {
         return vec![];
     };
     let sim = &ctx.sim.0;
-    let mut out = vec![
-        UiNode::sized("Planet Overview", Color::WHITE, 16.0),
-        UiNode::Gap,
-    ];
+    let mut out = vec![panel_head(Icon::Planet, ACCENT, "Planet overview", None)];
     let (Some(c), Some(s)) = (sim.colony(p), sim.surface(p)) else {
         out.push(UiNode::colored("Uncolonized", WARN));
         out.push(UiNode::dim("Deliver a colony kit by ship to build here."));
@@ -476,15 +503,18 @@ fn planet_overview(ctx: &PanelCtx) -> Vec<UiNode> {
     };
     out.push(UiNode::Spread(vec![
         UiNode::Row(vec![
-            UiNode::Icon(Icon::Warning, BAD, 20.0),
-            UiNode::text("Threats"),
+            UiNode::Badge(Icon::Warning, BAD, 22.0),
+            UiNode::sized("Threats", TEXT, 12.5),
         ]),
-        UiNode::colored(threat, tc),
+        UiNode::Chip(threat.to_uppercase(), tc),
     ]));
     if !c.active {
         let here = sim.player.at == Some(p);
         out.push(UiNode::Gap);
-        out.push(UiNode::colored("Work systems not established", WARN));
+        out.push(UiNode::Card(
+            vec![UiNode::colored("Work systems not established", WARN)],
+            WARN,
+        ));
         out.push(UiNode::btn_if(
             if here {
                 "Establish work systems"
@@ -510,10 +540,12 @@ fn planet_overview(ctx: &PanelCtx) -> Vec<UiNode> {
                 },
             )
         };
-        out.push(UiNode::Row(vec![
+        out.push(UiNode::Spread(vec![
             UiNode::dim("Policy"),
-            policy("Eliminate", Policy::Eliminate),
-            policy("Coexist", Policy::Coexist),
+            UiNode::Row(vec![
+                policy("Eliminate", Policy::Eliminate),
+                policy("Coexist", Policy::Coexist),
+            ]),
         ]));
     }
     out
@@ -691,7 +723,7 @@ fn placing_details(ctx: &PanelCtx, pl: Placeable) -> Vec<UiNode> {
     };
     let sim = &ctx.sim.0;
     let (w, h) = pl.size();
-    let mut cost = vec![UiNode::dim("Cost:")];
+    let mut cost = vec![UiNode::sized("COST", FAINT, 10.5)];
     cost.extend(cost_text(pl.cost(), sim.colony(p).map(|c| &c.inventory)));
     let desc = match pl {
         Placeable::Building(k) => k.spec().desc,
@@ -701,11 +733,18 @@ fn placing_details(ctx: &PanelCtx, pl: Placeable) -> Vec<UiNode> {
     };
     vec![
         UiNode::Row(vec![
-            UiNode::sized(pl.name(), Color::WHITE, 14.0),
-            UiNode::dim(format!(
-                "{w}x{h}  facing {:?}  -  R rotate, right-click remove, Q done",
-                ctx.dir.0
-            )),
+            UiNode::Badge(
+                match pl {
+                    Placeable::Building(k) => Cat::of(k).icon(),
+                    Placeable::Belt(_) => Icon::Belt,
+                },
+                AMBER,
+                26.0,
+            ),
+            UiNode::Spaced(pl.name().to_uppercase(), HEAD, 13.0),
+            UiNode::Chip(format!("{w}x{h}"), DIM),
+            UiNode::Chip(format!("facing {:?}", ctx.dir.0), ACCENT),
+            UiNode::sized("R rotate  -  right-click remove  -  Q done", FAINT, 11.0),
         ]),
         UiNode::Wrap(cost),
         UiNode::dim(desc),
@@ -733,29 +772,47 @@ fn flyout(ctx: &PanelCtx) -> Vec<UiNode> {
             } else {
                 format!("{} (locked)", pl.name())
             };
-            UiNode::Button(
+            let (w, h) = pl.size();
+            let (sub, sub_color) = if !unlocked {
+                (
+                    format!(
+                        "Locked - {}",
+                        pl.tech().map(|t| t.info().name).unwrap_or("research")
+                    ),
+                    FAINT,
+                )
+            } else if affordable {
+                (format!("{w}x{h}  -  {}", short_cost(pl.cost())), DIM)
+            } else {
+                (format!("{w}x{h}  -  {}", short_cost(pl.cost())), BAD)
+            };
+            UiNode::Choice {
+                title: format!(
+                    "{}{}",
+                    pl.name(),
+                    if unlocked { placeable_key(pl) } else { "" }
+                ),
                 label,
-                UiAction::SetTool(Tool::Build(pl)),
-                if !unlocked {
+                sub,
+                sub_color,
+                action: UiAction::SetTool(Tool::Build(pl)),
+                style: if !unlocked {
                     Btn::Disabled
                 } else if *ctx.tool == Tool::Build(pl) {
                     Btn::Active
-                } else if affordable {
-                    Btn::Normal
                 } else {
-                    Btn::Flat
+                    Btn::Normal
                 },
-            )
+            }
         })
         .collect();
     let mut out = vec![
-        UiNode::Spread(vec![
-            UiNode::Row(vec![
-                UiNode::Icon(cat.icon(), ACCENT, 20.0),
-                UiNode::sized(cat.name(), Color::WHITE, 15.0),
-            ]),
-            UiNode::IconBtn(Icon::Close, UiAction::Category(cat), Btn::Flat, 12.0),
-        ]),
+        panel_head(
+            cat.icon(),
+            AMBER,
+            cat.name(),
+            Some(UiAction::Category(cat)),
+        ),
         UiNode::Wrap(buttons),
     ];
     if let Tool::Build(pl) = *ctx.tool
@@ -814,10 +871,10 @@ fn research_card(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let r = &sim.research;
     let mut out = vec![UiNode::Spread(vec![
-        UiNode::sized("Current Research", Color::WHITE, 15.0),
+        panel_head(Icon::Flask, PURPLE, "Current research", None),
         UiNode::IconBtn(
             Icon::Atom,
-            UiAction::OpenWindow(Popup::Research),
+            UiAction::OpenWindow(Popup::TechTree),
             Btn::Flat,
             14.0,
         ),
@@ -825,35 +882,41 @@ fn research_card(ctx: &PanelCtx) -> Vec<UiNode> {
     match r.current {
         Some(t) => {
             let i = t.info();
+            let (accent, icon) = branch_style(i.branch);
             let prog = r.progress_of(t);
             let frac = prog as f32 / i.cost as f32;
             out.push(UiNode::Row(vec![
                 UiNode::IconBtn(
-                    Icon::Flask,
+                    icon,
                     UiAction::OpenWindow(Popup::Research),
                     Btn::Primary,
-                    28.0,
+                    24.0,
                 ),
                 UiNode::Fixed(
-                    220.0,
+                    226.0,
                     vec![
-                        UiNode::sized(i.name, Color::WHITE, 14.0),
-                        UiNode::colored(format!("{}%", (frac * 100.0) as u32), ACCENT),
-                        UiNode::Bar(frac, PURPLE),
                         UiNode::Spread(vec![
-                            UiNode::dim(format!("+{}/s", research_rate(sim))),
-                            UiNode::dim(format!(
-                                "{} / {}",
-                                fmt_num(prog as f64),
-                                fmt_num(i.cost as f64)
-                            )),
+                            UiNode::sized(i.name, Color::WHITE, 13.5),
+                            UiNode::sized(format!("{}%", (frac * 100.0) as u32), accent, 13.0),
+                        ]),
+                        UiNode::Bar(frac, accent),
+                        UiNode::Spread(vec![
+                            UiNode::sized(format!("+{}/s", research_rate(sim)), DIM, 11.0),
+                            UiNode::sized(
+                                format!("{} / {}", fmt_num(prog as f64), fmt_num(i.cost as f64)),
+                                DIM,
+                                11.0,
+                            ),
                         ]),
                     ],
                 ),
             ]));
         }
         None => {
-            out.push(UiNode::colored("No research project selected", WARN));
+            out.push(UiNode::Row(vec![
+                UiNode::Dot(WARN, 7.0),
+                UiNode::colored("No research project selected", WARN),
+            ]));
             out.push(UiNode::btn(
                 "Choose research [T]",
                 UiAction::OpenWindow(Popup::Research),
@@ -894,36 +957,49 @@ fn category_label(p: &Planet) -> String {
     .into()
 }
 
+fn category_short(p: &Planet) -> &'static str {
+    if !p.category_known() {
+        return "Unknown";
+    }
+    match p.category {
+        PlanetCategory::Living => "Temperate",
+        PlanetCategory::Rocky => "Rocky",
+        PlanetCategory::Ice => "Ice",
+        PlanetCategory::Volcanic => "Volcanic",
+        PlanetCategory::MetalRich => "Metal-rich",
+        PlanetCategory::Exotic => "Exotic",
+    }
+}
+
 fn system_card(ctx: &PanelCtx, sid: sim::SystemId) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let Some(s) = sim.universe.system(sid) else {
         return vec![];
     };
     let star = rgb(s.star.rgb());
+    let (kw, kc) = match s.knowledge {
+        SystemKnowledge::Unknown => ("UNKNOWN", FAINT),
+        SystemKnowledge::Detected => ("SCANNED", INFO),
+        SystemKnowledge::Visited => ("VISITED", GOOD),
+    };
     let mut out = vec![
         UiNode::Row(vec![
-            UiNode::Icon(Icon::Star, star, 34.0),
+            UiNode::Badge(Icon::Star, star, 42.0),
             UiNode::Col(vec![
-                UiNode::sized(s.name.clone(), Color::WHITE, 19.0),
-                UiNode::sized(s.star.name(), DIM, 12.0),
+                UiNode::Spaced(s.name.to_uppercase(), HEAD, 17.0),
+                UiNode::sized(s.star.name(), star.mix(&Color::WHITE, 0.4), 11.5),
             ]),
+        ]),
+        UiNode::Row(vec![
+            UiNode::Chip(format!("{} PLANETS", s.planets.len()), ACCENT),
+            UiNode::Chip(kw.into(), kc),
         ]),
         UiNode::Row(
             s.planets
                 .iter()
-                .map(|p| UiNode::Dot(category_color(p), 24.0))
+                .map(|p| UiNode::Dot(category_color(p), 22.0))
                 .collect(),
         ),
-        UiNode::dim(format!(
-            "{} planets  -  {}",
-            s.planets.len(),
-            match s.knowledge {
-                SystemKnowledge::Unknown => "unknown",
-                SystemKnowledge::Detected => "scanned",
-                SystemKnowledge::Visited => "visited",
-            }
-        )),
-        UiNode::Divider,
         UiNode::head("Planets"),
     ];
     if s.planets.is_empty() {
@@ -936,7 +1012,7 @@ fn system_card(ctx: &PanelCtx, sid: sim::SystemId) -> Vec<UiNode> {
             Icon::Planet,
             category_color(p),
             p.name.clone(),
-            category_label(p),
+            category_short(p).into(),
             UiAction::Select(Selection::Planet(p.id)),
             if ctx.selected.0 == Selection::Planet(p.id) {
                 Btn::Active
@@ -963,16 +1039,15 @@ fn system_card(ctx: &PanelCtx, sid: sim::SystemId) -> Vec<UiNode> {
         }
     }
     if !res.is_empty() {
-        out.push(UiNode::Divider);
-        out.push(UiNode::Row(vec![
-            UiNode::head("Resources"),
-            UiNode::dim("(scanned)"),
-        ]));
+        out.push(UiNode::head("Scanned resources"));
         for (i, n) in res.into_iter().take(8) {
             let (word, c) = richness_word(n);
-            out.push(UiNode::Row(vec![
-                UiNode::Icon(item_icon(i), item_color(i), 22.0),
-                UiNode::Col(vec![UiNode::text(i.name()), UiNode::sized(word, c, 11.0)]),
+            out.push(UiNode::Spread(vec![
+                UiNode::Row(vec![
+                    UiNode::Badge(item_icon(i), item_color(i), 22.0),
+                    UiNode::sized(i.name(), TEXT, 12.5),
+                ]),
+                UiNode::Chip(word.to_uppercase(), c),
             ]));
         }
     }
@@ -1009,18 +1084,21 @@ fn destination_card(ctx: &PanelCtx) -> Vec<UiNode> {
         .map(|(i, _)| UiNode::Icon(item_icon(i), item_color(i), 20.0))
         .collect();
     let mut out = vec![
-        UiNode::head("Selected Destination"),
+        panel_head(Icon::Target, ACCENT, "Selected destination", None),
         UiNode::Row(vec![
             UiNode::Dot(category_color(p), 52.0),
             UiNode::Col(vec![
-                UiNode::sized(p.name.clone(), Color::WHITE, 17.0),
-                UiNode::sized(category_label(p), DIM, 12.0),
+                UiNode::Spaced(p.name.to_uppercase(), HEAD, 15.0),
+                UiNode::sized(category_label(p), DIM, 11.5),
                 UiNode::Row(res),
             ]),
         ]),
     ];
     if sim.player.at == Some(pid) {
-        out.push(UiNode::colored("You are here", INFO));
+        out.push(UiNode::Row(vec![
+            UiNode::Dot(ACCENT, 7.0),
+            UiNode::colored("You are here", ACCENT),
+        ]));
         if p.surface.is_some() {
             out.push(UiNode::Button(
                 "View surface".into(),
@@ -1033,13 +1111,17 @@ fn destination_card(ctx: &PanelCtx) -> Vec<UiNode> {
     match (sim.player.at, journey_ship(sim, ctx.focus.0)) {
         (Some(at), Some(ship)) => match ship.plan_trip(&sim.universe, at, pid) {
             Ok(plan) => {
-                out.push(UiNode::dim(format!(
-                    "Aboard {}: {} travel, {} {}",
-                    ship.name,
+                out.push(UiNode::Kv("Ship".into(), ship.name.clone(), TEXT));
+                out.push(UiNode::Kv(
+                    "Travel time".into(),
                     fmt_ticks(plan.ticks),
-                    plan.fuel.1,
-                    plan.fuel.0.name()
-                )));
+                    Color::WHITE,
+                ));
+                out.push(UiNode::Kv(
+                    "Fuel".into(),
+                    format!("{} {}", plan.fuel.1, plan.fuel.0.name()),
+                    YELLOW,
+                ));
                 let mut cmds = Vec::new();
                 if sim.player.riding != Some(ship.id) {
                     cmds.push(Command::Ride {
@@ -1112,13 +1194,18 @@ fn map_nav(ctx: &PanelCtx) -> Vec<UiNode> {
             if active { Btn::Active } else { Btn::Flat },
         )
     };
-    let legend =
-        |c: Color, label: &str| UiNode::Row(vec![UiNode::Dot(c, 11.0), UiNode::text(label)]);
+    let legend = |c: Color, label: &str| {
+        UiNode::Row(vec![
+            UiNode::Dot(c, 9.0),
+            UiNode::sized(label, TEXT, 12.0),
+        ])
+    };
     let zoom_frac = {
         let (lo, hi) = ctx.rig.dist_range;
         1.0 - ((ctx.rig.goal_dist - lo) / (hi - lo)).clamp(0.0, 1.0)
     };
     vec![
+        panel_head(Icon::Galaxy, ACCENT, "Navigation", None),
         nav(
             Icon::Galaxy,
             "Galaxy",
@@ -1161,7 +1248,7 @@ fn map_nav(ctx: &PanelCtx) -> Vec<UiNode> {
             UiAction::ViewMap(MapLevel::Universe),
             level == MapLevel::Universe,
         ),
-        UiNode::Divider,
+        UiNode::head("Legend"),
         legend(Color::srgb(0.3, 0.85, 1.0), "Your location"),
         legend(Color::srgb(0.5, 0.75, 1.0), "Known (visited) system"),
         legend(Color::srgb(0.55, 0.58, 0.65), "Scanned system"),
@@ -1169,26 +1256,25 @@ fn map_nav(ctx: &PanelCtx) -> Vec<UiNode> {
         legend(Color::srgb(0.35, 1.0, 0.5), "Colonized planet"),
         legend(Color::srgb(1.0, 0.75, 0.25), "Outpost (inactive colony)"),
         UiNode::Row(vec![
-            UiNode::Icon(Icon::Warning, BAD, 12.0),
-            UiNode::text("Hostile life"),
+            UiNode::Icon(Icon::Warning, BAD, 11.0),
+            UiNode::sized("Hostile life", TEXT, 12.0),
         ]),
         UiNode::Row(vec![
-            UiNode::colored("- - -", YELLOW),
-            UiNode::text("Trade route"),
+            UiNode::sized("- - -", YELLOW, 12.0),
+            UiNode::sized("Trade route", TEXT, 12.0),
         ]),
         UiNode::Row(vec![
-            UiNode::colored("------", ACCENT),
-            UiNode::text("Travel route"),
+            UiNode::sized("-----", ACCENT, 12.0),
+            UiNode::sized("Travel route", TEXT, 12.0),
         ]),
-        UiNode::Divider,
-        UiNode::dim("Zoom"),
+        UiNode::head("Zoom"),
         UiNode::Row(vec![
-            UiNode::IconBtn(Icon::Minus, UiAction::Zoom(1.25), Btn::Flat, 12.0),
+            UiNode::IconBtn(Icon::Minus, UiAction::Zoom(1.25), Btn::Normal, 10.0),
             UiNode::Fixed(
-                150.0,
+                156.0,
                 vec![UiNode::Bar((zoom_frac * 20.0).round() / 20.0, ACCENT)],
             ),
-            UiNode::IconBtn(Icon::Plus, UiAction::Zoom(0.8), Btn::Flat, 12.0),
+            UiNode::IconBtn(Icon::Plus, UiAction::Zoom(0.8), Btn::Normal, 10.0),
         ]),
     ]
 }
@@ -1197,11 +1283,17 @@ fn resources_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let scope = scope_of(&ctx.view, sim);
     let (items, _) = snapshot(sim, scope);
-    let title = match scope {
-        crate::hud::Scope::Colony(p) => format!("Resources - {}", planet_name(sim, p)),
-        crate::hud::Scope::Civ => "Resources - all colonies".into(),
+    let sub = match scope {
+        crate::hud::Scope::Colony(p) => format!("Stored at {}", planet_name(sim, p)),
+        crate::hud::Scope::Civ => "All colonies combined".into(),
     };
-    let mut out = vec![window_header(&title, Popup::Resources)];
+    let total: u32 = items.values().sum();
+    let mut out = vec![window_header(
+        Icon::Cube,
+        "Resources",
+        format!("{sub}  -  {} items", fmt_num(total as f64)),
+        Popup::Resources,
+    )];
     if items.is_empty() {
         out.push(UiNode::dim(
             "Nothing stored yet. Belts into a Depot fill the inventory.",
@@ -1210,28 +1302,83 @@ fn resources_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let mut cols: Vec<Vec<UiNode>> = vec![vec![], vec![], vec![]];
     let mut list: Vec<(Item, u32)> = items.into_iter().collect();
     list.sort_by_key(|(i, _)| (i.tier(), *i));
-    for (k, (i, n)) in list.into_iter().enumerate() {
+    for (i, n) in list {
+        let tier = i.tier();
         let (r, c) = rate_text(ctx.rates.item_per_min(i));
-        cols[k % 3].push(UiNode::Spread(vec![
-            UiNode::Row(vec![
-                UiNode::Icon(item_icon(i), item_color(i), 20.0),
-                UiNode::text(i.name()),
-            ]),
-            UiNode::Row(vec![
-                UiNode::sized(fmt_num(n as f64), Color::WHITE, 13.0),
-                UiNode::sized(r, c, 11.0),
-            ]),
-        ]));
+        let slot = cols
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| c.len())
+            .map(|(n, _)| n)
+            .unwrap_or(0);
+        cols[slot].push(UiNode::Card(
+            vec![UiNode::Spread(vec![
+                UiNode::Row(vec![
+                    UiNode::Badge(item_icon(i), item_color(i), 26.0),
+                    UiNode::Col(vec![
+                        UiNode::text(i.name()),
+                        UiNode::sized(format!("Tier {tier}"), FAINT, 10.0),
+                    ]),
+                ]),
+                UiNode::Col(vec![
+                    UiNode::sized(fmt_num(n as f64), Color::WHITE, 14.0),
+                    UiNode::sized(r, c, 10.5),
+                ]),
+            ])],
+            item_color(i),
+        ));
     }
-    out.push(UiNode::Columns(cols));
+    out.push(UiNode::Scroll {
+        key: "resources",
+        height: Val::Vh(62.0),
+        items: vec![UiNode::Columns(cols)],
+    });
     out
 }
 
-fn window_header(title: &str, p: Popup) -> UiNode {
-    UiNode::Spread(vec![
-        UiNode::sized(title, Color::srgb(0.55, 0.85, 1.0), 22.0),
-        UiNode::IconBtn(Icon::Close, UiAction::OpenWindow(p), Btn::Flat, 14.0),
-    ])
+fn window_header(icon: Icon, title: &str, sub: String, p: Popup) -> UiNode {
+    window_header_with(icon, ACCENT, title, sub, vec![], p)
+}
+
+/// Window title block: icon plate, letter-spaced caps title with a subtitle, optional
+/// controls on the right, close button and a hairline beneath.
+fn window_header_with(
+    icon: Icon,
+    accent: Color,
+    title: &str,
+    sub: String,
+    right: Vec<UiNode>,
+    p: Popup,
+) -> UiNode {
+    let mut row = vec![
+        UiNode::Badge(icon, accent, 42.0),
+        UiNode::Col(vec![
+            UiNode::Spaced(title.to_uppercase(), HEAD, 20.0),
+            UiNode::sized(sub, DIM, 11.5),
+        ]),
+        UiNode::Spacer,
+    ];
+    row.extend(right);
+    row.push(UiNode::IconBtn(
+        Icon::Close,
+        UiAction::OpenWindow(p),
+        Btn::Flat,
+        13.0,
+    ));
+    UiNode::Col(vec![UiNode::Row(row), UiNode::Divider])
+}
+
+/// HUD panel heading: small icon plate and a letter-spaced caps title, with an optional
+/// close button on the right.
+fn panel_head(icon: Icon, accent: Color, title: &str, close: Option<UiAction>) -> UiNode {
+    let mut row = vec![UiNode::Row(vec![
+        UiNode::Badge(icon, accent, 24.0),
+        UiNode::Spaced(title.to_uppercase(), HEAD, 12.0),
+    ])];
+    if let Some(a) = close {
+        row.push(UiNode::IconBtn(Icon::Close, a, Btn::Flat, 11.0));
+    }
+    UiNode::Spread(row)
 }
 
 const TIER_COLORS: [u32; 4] = [0x3ea0ff, 0x3fd07a, 0xa070ff, 0xff8a3a];
@@ -1239,13 +1386,6 @@ const TIER_COLORS: [u32; 4] = [0x3ea0ff, 0x3fd07a, 0xa070ff, 0xff8a3a];
 fn tech_tree_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let r = &ctx.sim.0.research;
     let time = ctx.tech_tab.0;
-    let tab = |label: &str, on: bool| {
-        UiNode::Button(
-            label.into(),
-            UiAction::TechTab(on),
-            if time == on { Btn::Active } else { Btn::Normal },
-        )
-    };
     let done = Tech::ALL.iter().filter(|t| r.has(**t)).count();
     let mut out = vec![
         UiNode::Row(vec![
@@ -1269,8 +1409,14 @@ fn tech_tree_window(ctx: &PanelCtx) -> Vec<UiNode> {
             ),
             UiNode::Col(vec![current_research_card(ctx)]),
             UiNode::Spacer,
-            tab("Technologies", false),
-            tab("Time control", true),
+            UiNode::Tabs(vec![
+                (
+                    "Technologies".into(),
+                    UiAction::TechTab(false),
+                    !time,
+                ),
+                ("Time control".into(), UiAction::TechTab(true), time),
+            ]),
             UiNode::IconBtn(
                 Icon::Close,
                 UiAction::OpenWindow(Popup::TechTree),
@@ -1524,12 +1670,20 @@ fn cost_text(cost: &[(Item, u32)], have: Option<&sim::Inventory>) -> Vec<UiNode>
         .map(|&(i, n)| {
             let ok = have.is_none_or(|inv| inv.get(i) >= n);
             let s = match have {
-                Some(inv) => format!("{n} {} ({})", i.name(), inv.get(i)),
+                Some(inv) => format!("{n} {}  /  {}", i.name(), fmt_num(inv.get(i) as f64)),
                 None => format!("{n} {}", i.name()),
             };
-            UiNode::colored(s, if ok { INFO } else { BAD })
+            UiNode::Chip(s, if ok { INFO } else { BAD })
         })
         .collect()
+}
+
+/// Compact cost line for build choices ("5 Iron plate, 3 Gear").
+fn short_cost(cost: &[(Item, u32)]) -> String {
+    if cost.is_empty() {
+        return "free".into();
+    }
+    cost_string(cost)
 }
 
 fn cost_string(cost: &[(Item, u32)]) -> String {
@@ -1553,27 +1707,53 @@ fn research_rate(sim: &Sim) -> u32 {
 }
 
 fn log(ctx: &PanelCtx) -> Vec<UiNode> {
-    ctx.log
-        .entries
-        .iter()
-        .filter(|m| m.age < 9.0)
-        .take(4)
-        .map(|m| {
-            let c = match m.kind {
-                MsgKind::Info => INFO,
-                MsgKind::Good => GOOD,
-                MsgKind::Warn => WARN,
-                MsgKind::Error => BAD,
-            };
-            UiNode::Card(
-                vec![UiNode::Row(vec![
-                    UiNode::Dot(c, 8.0),
-                    UiNode::colored(m.text.clone(), Color::WHITE),
-                ])],
-                c,
-            )
-        })
-        .collect()
+    let mut out: Vec<UiNode> = vec![];
+    let net = &ctx.net;
+    if net.in_game() {
+        if net.catching_up() {
+            out.push(UiNode::colored(
+                format!("Syncing with the server... {} / {}", net.turn, net.head()),
+                WARN,
+            ));
+        }
+        let names: Vec<&str> = net.players.iter().map(|(_, n)| n.as_str()).collect();
+        out.push(UiNode::dim(format!(
+            "Online ({}): {}",
+            names.len(),
+            names.join(", ")
+        )));
+    }
+    out.extend(
+        ctx.log
+            .entries
+            .iter()
+            .filter(|m| m.age < 9.0)
+            .take(4)
+            .map(|m| {
+                let c = match m.kind {
+                    MsgKind::Info => INFO,
+                    MsgKind::Good => GOOD,
+                    MsgKind::Warn => WARN,
+                    MsgKind::Error => BAD,
+                };
+                UiNode::Card(
+                    vec![UiNode::Row(vec![
+                        UiNode::Dot(c, 8.0),
+                        UiNode::colored(m.text.clone(), Color::WHITE),
+                    ])],
+                    c,
+                )
+            }),
+    );
+    if ctx.menu.focus == Some(crate::menu::FieldId::Chat) {
+        out.push(UiNode::Field {
+            id: crate::menu::FieldId::Chat,
+            value: ctx.menu.chat.clone(),
+            hint: "Say something (Enter sends, Esc cancels)".into(),
+            focused: true,
+        });
+    }
+    out
 }
 
 fn overlay(ctx: &PanelCtx) -> Vec<UiNode> {
@@ -1635,43 +1815,55 @@ fn status_color(s: Status) -> Color {
 
 fn inv_rows(inv: &sim::Inventory) -> Vec<UiNode> {
     if inv.is_empty() {
-        return vec![UiNode::dim("  (empty)")];
+        return vec![UiNode::sized("empty", FAINT, 11.5)];
     }
     vec![UiNode::Wrap(
         inv.iter()
-            .map(|(i, n)| {
-                UiNode::colored(format!("{} x{}", i.name(), n), rgb(i.rgb()).lighter(0.15))
-            })
+            .map(|(i, n)| UiNode::Chip(format!("{} x{}", i.name(), n), item_color(i)))
             .collect(),
     )]
+}
+
+/// Labelled buffer line: caption on the left, item chips on the right.
+fn buffer_row(label: &str, inv: &sim::Inventory) -> UiNode {
+    let mut row = vec![UiNode::Fixed(
+        46.0,
+        vec![UiNode::sized(label.to_uppercase(), FAINT, 10.5)],
+    )];
+    row.extend(inv_rows(inv));
+    UiNode::Row(row)
+}
+
+/// Icon + label on the left, value on the right.
+fn stat_line(icon: Icon, ic: Color, label: &str, value: String, vc: Color) -> UiNode {
+    UiNode::Spread(vec![
+        UiNode::Row(vec![UiNode::Icon(icon, ic, 15.0), UiNode::sized(label, DIM, 12.5)]),
+        UiNode::sized(value, vc, 13.0),
+    ])
 }
 
 fn building_info(ctx: &PanelCtx, p: PlanetId, b: &Building) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let spec = b.kind.spec();
     let inv = sim.colony(p).map(|c| &c.inventory);
+    let cat = Cat::of(b.kind);
+    let cc = codex_cat_color(cat);
+    let sc = status_color(b.status);
     let mut out = vec![
-        UiNode::Spread(vec![
-            UiNode::sized("Selected Building", Color::WHITE, 15.0),
-            UiNode::IconBtn(
-                Icon::Close,
-                UiAction::Select(Selection::None),
-                Btn::Flat,
-                12.0,
-            ),
-        ]),
+        panel_head(
+            Icon::Gear,
+            ACCENT,
+            "Selected building",
+            Some(UiAction::Select(Selection::None)),
+        ),
         UiNode::Row(vec![
-            UiNode::IconBtn(
-                Cat::of(b.kind).icon(),
-                UiAction::Select(Selection::Building(p, b.id)),
-                Btn::Primary,
-                30.0,
-            ),
+            UiNode::Badge(cat.icon(), cc, 46.0),
             UiNode::Col(vec![
-                UiNode::sized(spec.name, Color::WHITE, 17.0),
+                UiNode::Spaced(spec.name.to_string(), HEAD, 17.0),
                 UiNode::Row(vec![
-                    UiNode::Dot(status_color(b.status), 9.0),
-                    UiNode::colored(b.status.label(), status_color(b.status)),
+                    UiNode::Chip(cat.name().to_string(), cc),
+                    UiNode::Dot(sc, 7.0),
+                    UiNode::sized(b.status.label(), sc, 12.0),
                 ]),
             ]),
         ]),
@@ -1682,70 +1874,86 @@ fn building_info(ctx: &PanelCtx, p: PlanetId, b: &Building) -> Vec<UiNode> {
         let i = rec.info();
         let secs = i.ticks as f32 * 100.0 / b.speed() as f32 / sim::TICKS_PER_SEC as f32;
         let frac = (b.progress as f32 / (i.ticks as f32 * 100.0)).min(1.0);
-        out.push(UiNode::Row(vec![
-            UiNode::dim("Recipe:"),
-            UiNode::colored(i.name, ACCENT),
-        ]));
-        out.push(UiNode::Bar(frac, ACCENT));
-        out.push(UiNode::Spread(vec![
-            UiNode::dim(format!("{secs:.1}s per cycle")),
-            UiNode::dim(format!("{}%", (frac * 100.0) as u32)),
-        ]));
-        let per_min = |n: u32| format!("{:.1} /min", n as f32 * 60.0 / secs);
-        let rows = |list: &[(Item, u32)]| {
-            UiNode::Wrap(
-                list.iter()
-                    .map(|&(it, n)| {
-                        UiNode::Row(vec![
-                            UiNode::Icon(item_icon(it), item_color(it), 18.0),
-                            UiNode::text(per_min(n)),
-                        ])
-                    })
-                    .collect(),
-            )
+        let per_min = |n: u32| format!("{:.1}/min", n as f32 * 60.0 / secs);
+        let rows = |list: &[(Item, u32)]| -> Vec<UiNode> {
+            list.iter()
+                .map(|&(it, n)| {
+                    UiNode::Row(vec![
+                        UiNode::Badge(item_icon(it), item_color(it), 22.0),
+                        UiNode::Col(vec![
+                            UiNode::sized(it.name(), TEXT, 11.5),
+                            UiNode::sized(per_min(n), item_color(it).lighter(0.1), 11.0),
+                        ]),
+                    ])
+                })
+                .collect()
         };
-        out.push(UiNode::dim("Input"));
-        out.push(rows(i.inputs));
-        out.push(UiNode::dim("Output"));
-        out.push(rows(i.outputs));
-        out.push(UiNode::Divider);
+        let mut ins = vec![UiNode::sized("INPUT", FAINT, 10.5)];
+        ins.extend(rows(i.inputs));
+        let mut outs = vec![UiNode::sized("OUTPUT", FAINT, 10.5)];
+        outs.extend(rows(i.outputs));
+        out.push(UiNode::head("Production"));
+        out.push(UiNode::Card(
+            vec![
+                UiNode::Spread(vec![
+                    UiNode::sized(i.name, Color::WHITE, 13.5),
+                    UiNode::Chip(format!("{secs:.1}s cycle"), ACCENT),
+                ]),
+                UiNode::Row(vec![
+                    UiNode::Fixed(230.0, vec![UiNode::Bar(frac, ACCENT)]),
+                    UiNode::sized(format!("{}%", (frac * 100.0) as u32), DIM, 11.0),
+                ]),
+                UiNode::Columns(vec![ins, outs]),
+            ],
+            ACCENT,
+        ));
+    }
+    if spec.power > 0 || spec.power_gen > 0 || spec.workers > 0 {
+        out.push(UiNode::head("Status"));
     }
     if spec.power > 0 {
-        out.push(UiNode::Spread(vec![
-            UiNode::Row(vec![
-                UiNode::Icon(Icon::Bolt, YELLOW, 16.0),
-                UiNode::text("Power"),
-            ]),
-            UiNode::colored(
-                fmt_kw(b.power_draw() as i64),
-                if b.powered { TEXT } else { BAD },
-            ),
-        ]));
-        out.push(UiNode::Spread(vec![
-            UiNode::Row(vec![
-                UiNode::Icon(Icon::Gear, INFO, 16.0),
-                UiNode::text("Efficiency"),
-            ]),
-            UiNode::text(format!("{}%", b.speed())),
-        ]));
+        out.push(stat_line(
+            Icon::Bolt,
+            YELLOW,
+            "Power draw",
+            fmt_kw(b.power_draw() as i64),
+            if b.powered { TEXT } else { BAD },
+        ));
+        out.push(stat_line(
+            Icon::Gear,
+            INFO,
+            "Efficiency",
+            format!("{}%", b.speed()),
+            TEXT,
+        ));
     }
     if spec.power_gen > 0 {
-        out.push(UiNode::text(format!(
-            "Generates up to {}",
-            fmt_kw(spec.power_gen as i64)
-        )));
+        out.push(stat_line(
+            Icon::Bolt,
+            POWER,
+            "Generates up to",
+            fmt_kw(spec.power_gen as i64),
+            POWER,
+        ));
     }
     if spec.workers > 0 {
-        out.push(UiNode::text(format!(
-            "Workers: {} ({})",
-            spec.workers,
-            if b.staffed { "staffed" } else { "unstaffed" }
-        )));
+        out.push(stat_line(
+            Icon::Person,
+            INFO,
+            "Workers",
+            format!(
+                "{} ({})",
+                spec.workers,
+                if b.staffed { "staffed" } else { "unstaffed" }
+            ),
+            if b.staffed { TEXT } else { BAD },
+        ));
     }
     let r = &sim.research;
     if let Some((cat, _)) = b.kind.crafting() {
+        out.push(UiNode::head("Recipe"));
         if b.recipe.is_none() {
-            out.push(UiNode::colored("No recipe selected", WARN));
+            out.push(UiNode::colored("No recipe selected - pick one below", WARN));
         }
         let recipes: Vec<UiNode> = Recipe::ALL
             .iter()
@@ -1767,11 +1975,10 @@ fn building_info(ctx: &PanelCtx, p: PlanetId, b: &Building) -> Vec<UiNode> {
                 )
             })
             .collect();
-        out.push(UiNode::dim("Choose recipe:"));
         out.push(UiNode::Wrap(recipes));
-        out.push(UiNode::dim("Buffers (in / out):"));
-        out.extend(inv_rows(&b.input));
-        out.extend(inv_rows(&b.output));
+        out.push(UiNode::head("Buffers"));
+        out.push(buffer_row("In", &b.input));
+        out.push(buffer_row("Out", &b.output));
     }
     if b.kind.is_miner() {
         match b.filter {
@@ -1779,26 +1986,40 @@ fn building_info(ctx: &PanelCtx, p: PlanetId, b: &Building) -> Vec<UiNode> {
                 let s = sim.surface(p).expect("surface");
                 let per_min =
                     b.speed() as u64 * s.richness_of(item) as u64 * 60 * sim::TICKS_PER_SEC / 6000;
-                out.push(UiNode::text(format!(
-                    "Extracting {} - {} per minute (deposits never deplete)",
-                    item.name(),
-                    per_min
-                )));
+                out.push(UiNode::head("Extraction"));
+                out.push(UiNode::Card(
+                    vec![
+                        UiNode::Row(vec![
+                            UiNode::Badge(item_icon(item), item_color(item), 30.0),
+                            UiNode::Col(vec![
+                                UiNode::sized(item.name(), Color::WHITE, 13.5),
+                                UiNode::sized(
+                                    format!("{per_min} per minute"),
+                                    item_color(item).lighter(0.15),
+                                    12.0,
+                                ),
+                            ]),
+                        ]),
+                        UiNode::sized("Deposits never deplete.", FAINT, 11.0),
+                    ],
+                    item_color(item),
+                ));
             }
             None => out.push(UiNode::colored("No deposit under this miner", BAD)),
         }
-        out.extend(inv_rows(&b.output));
+        out.push(buffer_row("Out", &b.output));
     }
     if b.kind.takes_modules() {
-        out.push(UiNode::text(format!(
-            "Modules ({}/2): {}",
-            b.modules.len(),
-            b.modules
-                .iter()
-                .map(|m| m.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        out.push(UiNode::head(format!("Modules  {}/2", b.modules.len())));
+        let mut slots: Vec<UiNode> = b
+            .modules
+            .iter()
+            .map(|m| UiNode::Chip(m.name().to_string(), PURPLE))
+            .collect();
+        for _ in b.modules.len()..2 {
+            slots.push(UiNode::Chip("empty slot".into(), FAINT));
+        }
+        out.push(UiNode::Wrap(slots));
         if r.has(Tech::Modules) && b.modules.len() < 2 {
             let mut row = Vec::new();
             for m in [Item::SpeedModule, Item::EfficiencyModule] {
@@ -1944,10 +2165,11 @@ fn building_info(ctx: &PanelCtx, p: PlanetId, b: &Building) -> Vec<UiNode> {
         }
         _ => {}
     }
-    out.push(UiNode::dim(spec.desc));
+    out.push(UiNode::Divider);
+    out.push(UiNode::sized(spec.desc, DIM, 11.5));
     out.push(UiNode::Gap);
     out.push(UiNode::Button(
-        "Demolish (refund)".into(),
+        "Demolish  (refund)".into(),
         UiAction::Cmd(Command::Remove {
             planet: p,
             x: b.x,
@@ -2395,7 +2617,16 @@ fn research_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
     let r = &sim.research;
     let mut out = vec![
-        window_header("Research", Popup::Research),
+        window_header(
+            Icon::Flask,
+            "Research",
+            format!(
+                "{} of {} technologies researched",
+                Tech::ALL.iter().filter(|t| r.has(**t)).count(),
+                Tech::ALL.len()
+            ),
+            Popup::Research,
+        ),
         UiNode::Row(vec![
             UiNode::text(format!(
                 "+{} points/s | pool {} | lifetime {}",
@@ -2475,7 +2706,12 @@ fn research_window(ctx: &PanelCtx) -> Vec<UiNode> {
 
 fn ships_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
-    let mut out = vec![window_header("Ships", Popup::Ships)];
+    let mut out = vec![window_header(
+        Icon::Rocket,
+        "Ships",
+        format!("{} ships in service", sim.ships.len()),
+        Popup::Ships,
+    )];
     if sim.ships.is_empty() {
         out.push(UiNode::dim(
             "No ships yet. Research Rocketry, build a Shipyard, and order a Scout.",
@@ -2526,8 +2762,13 @@ fn ships_window(ctx: &PanelCtx) -> Vec<UiNode> {
 
 fn logistics_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
-    let mut out = vec![window_header("Logistics", Popup::Logistics)];
     let routed: Vec<&Ship> = sim.ships.values().filter(|s| s.route.is_some()).collect();
+    let mut out = vec![window_header(
+        Icon::Box,
+        "Logistics",
+        format!("{} automated routes", routed.len()),
+        Popup::Logistics,
+    )];
     out.push(UiNode::head("Automated routes"));
     if routed.is_empty() {
         out.push(UiNode::dim(if sim.research.has(Tech::LogisticsAutomation) {
@@ -2577,7 +2818,12 @@ fn logistics_window(ctx: &PanelCtx) -> Vec<UiNode> {
 
 fn colonies_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let sim = &ctx.sim.0;
-    let mut out = vec![window_header("Colonies", Popup::Colonies)];
+    let mut out = vec![window_header(
+        Icon::Colony,
+        "Colonies",
+        format!("{} colonies", sim.colonies().count()),
+        Popup::Colonies,
+    )];
     for p in sim.colonies() {
         let c = p.colony.as_ref().expect("colony");
         let s = p.surface.as_ref().expect("surface");
@@ -2629,13 +2875,6 @@ fn codex_window(ctx: &PanelCtx) -> Vec<UiNode> {
         CodexTab::Buildings => format!("{places_known} of {} structures unlocked", places.len()),
         CodexTab::Items => format!("{} item types across six tiers", Item::ALL.len()),
     };
-    let tab_btn = |label: &str, t: CodexTab| {
-        UiNode::Button(
-            label.into(),
-            UiAction::CodexTab(t),
-            if tab == t { Btn::Active } else { Btn::Normal },
-        )
-    };
     let mut out = vec![
         UiNode::Row(vec![
             UiNode::Icon(Icon::Book, ACCENT, 30.0),
@@ -2647,9 +2886,23 @@ fn codex_window(ctx: &PanelCtx) -> Vec<UiNode> {
                 ],
             ),
             UiNode::Spacer,
-            tab_btn("Recipes", CodexTab::Recipes),
-            tab_btn("Structures", CodexTab::Buildings),
-            tab_btn("Items", CodexTab::Items),
+            UiNode::Tabs(vec![
+                (
+                    "Recipes".into(),
+                    UiAction::CodexTab(CodexTab::Recipes),
+                    tab == CodexTab::Recipes,
+                ),
+                (
+                    "Structures".into(),
+                    UiAction::CodexTab(CodexTab::Buildings),
+                    tab == CodexTab::Buildings,
+                ),
+                (
+                    "Items".into(),
+                    UiAction::CodexTab(CodexTab::Items),
+                    tab == CodexTab::Items,
+                ),
+            ]),
             UiNode::IconBtn(
                 Icon::Close,
                 UiAction::OpenWindow(Popup::Codex),
@@ -3036,7 +3289,12 @@ fn goals(sim: &Sim) -> Vec<(bool, &'static str)> {
 
 fn help_window(ctx: &PanelCtx) -> Vec<UiNode> {
     let mut out = vec![
-        window_header("Help", Popup::Help),
+        window_header(
+            Icon::Gear,
+            "Help",
+            "Controls and reference".to_string(),
+            Popup::Help,
+        ),
         UiNode::Row(vec![
             UiNode::btn("Save game [F5]", UiAction::Save),
             UiNode::btn("Reload last save [F9]", UiAction::Load),
@@ -3135,10 +3393,7 @@ fn rate_controls(p: PlanetId, b: &sim::surface::Building) -> Vec<UiNode> {
             output: o,
         })
     };
-    let mut out = vec![
-        UiNode::Divider,
-        UiNode::colored("Throughput limits", ACCENT),
-    ];
+    let mut out = vec![UiNode::head("Throughput limits")];
     if takes_in {
         out.push(UiNode::Stepper {
             label: "Max input".into(),

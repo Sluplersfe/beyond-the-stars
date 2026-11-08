@@ -43,6 +43,11 @@ fn field_name(id: FieldId) -> &'static str {
     match id {
         FieldId::Name => "name",
         FieldId::Seed => "seed",
+        FieldId::Server => "server",
+        FieldId::PlayerName => "player",
+        FieldId::RoomName => "room",
+        FieldId::RoomPass => "roompass",
+        FieldId::Chat => "chat",
     }
 }
 
@@ -50,6 +55,11 @@ pub fn field_from_name(s: &str) -> Option<FieldId> {
     match s {
         "name" => Some(FieldId::Name),
         "seed" => Some(FieldId::Seed),
+        "server" => Some(FieldId::Server),
+        "player" => Some(FieldId::PlayerName),
+        "room" => Some(FieldId::RoomName),
+        "roompass" => Some(FieldId::RoomPass),
+        "chat" => Some(FieldId::Chat),
         _ => None,
     }
 }
@@ -188,6 +198,9 @@ pub fn page_name(p: crate::menu::Page) -> &'static str {
         Page::Load => "load",
         Page::Settings => "settings",
         Page::Pause => "pause",
+        Page::Multiplayer => "multiplayer",
+        Page::CreateRoom => "create",
+        Page::HostWorld => "host",
     }
 }
 

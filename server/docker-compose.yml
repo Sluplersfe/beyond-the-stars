@@ -1,0 +1,20 @@
+services:
+  bts-server:
+    build: .
+    container_name: bts-server
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+    environment:
+      BTS_MAX_SPEED: "64"
+      BTS_MAX_ROOMS: "40"
+      # BTS_SERVER_PASS: ""   # set to require a password to connect at all
+    volumes:
+      - bts-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+
+volumes:
+  bts-data:

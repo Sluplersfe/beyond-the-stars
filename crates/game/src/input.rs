@@ -89,6 +89,7 @@ fn global_keys(
     sim: Res<SimState>,
     mut acts: ResMut<UiActions>,
     mut menu: ResMut<MenuQueue>,
+    mut sfx: ResMut<crate::audio::SfxQueue>,
 ) {
     let r = &sim.0.research;
     if keys.just_pressed(KeyCode::Escape) {
@@ -110,6 +111,7 @@ fn global_keys(
     }
     if keys.just_pressed(KeyCode::KeyR) {
         dir.0 = dir.0.rotate_cw();
+        sfx.0.push(crate::audio::Sfx::Rotate);
     }
     for (k, w) in [
         (KeyCode::KeyT, Popup::Research),

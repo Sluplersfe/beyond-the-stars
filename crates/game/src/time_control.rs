@@ -43,7 +43,12 @@ impl Plugin for TimeControlPlugin {
             .configure_sets(Update, SimStep.run_if(crate::menu::gameplay))
             .add_systems(
                 Update,
-                (time_keys, clamp_speed, step_sim, instant_warp)
+                (
+                    time_keys,
+                    clamp_speed,
+                    step_sim.run_if(crate::net::offline),
+                    instant_warp.run_if(crate::net::offline),
+                )
                     .chain()
                     .in_set(SimStep),
             );
@@ -70,9 +75,14 @@ fn time_keys(
     mut virt: ResMut<Time<Virtual>>,
     sim: Res<SimState>,
     mut log: ResMut<MessageLog>,
+    net: Res<crate::net::Net>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
-        virt.toggle();
+        if net.in_game() {
+            net.request_pause(!net.paused);
+        } else {
+            virt.toggle();
+        }
     }
     let max = sim.0.research.max_speed();
     let mut want = None;
@@ -101,8 +111,12 @@ fn time_keys(
                 format!("{s}x is not unlocked yet (max {max}x). Research time acceleration."),
             );
         }
-        speed.0 = s.min(max);
-        virt.unpause();
+        if net.in_game() {
+            net.request_speed(s.min(max).min(net.max_speed));
+        } else {
+            speed.0 = s.min(max);
+            virt.unpause();
+        }
     }
 }
 

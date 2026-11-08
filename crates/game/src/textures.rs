@@ -567,7 +567,7 @@ fn pack(levels: &[Vec<Texel>], n: usize, f: impl Fn(&Texel) -> [u8; 4] + Sync) -
     for level in levels {
         let (head, tail) = std::mem::take(&mut rest).split_at_mut(level.len() * 4);
         par_rows(head, size * 4, |y, row| {
-            for (x, out) in row.chunks_exact_mut(4).enumerate() {
+            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 out.copy_from_slice(&f(&level[y * size + x]));
             }
         });
@@ -1008,19 +1008,20 @@ mod tests {
 
     /// Mean absolute difference of one channel of mip 0 across the wrap-around seam and
     /// between interior neighbours: `[(seam, interior) horizontally, (…) vertically]`.
+    /// (step across the wrap-around seam, worst step across any interior line), per axis.
+    /// Comparing against the worst interior line keeps sparse features (a lone scratch
+    /// running along a line) from failing a texture that does tile.
     fn seams(data: &[u8], n: usize, ch: usize) -> [(f32, f32); 2] {
         let at = |x: usize, y: usize| data[(y * n + x) * 4 + ch] as f32;
-        let (mut hs, mut hi, mut vs, mut vi) = (0.0, 0.0, 0.0, 0.0);
-        for a in 0..n {
-            hs += (at(n - 1, a) - at(0, a)).abs();
-            vs += (at(a, n - 1) - at(a, 0)).abs();
-            for b in 0..n - 1 {
-                hi += (at(b, a) - at(b + 1, a)).abs();
-                vi += (at(a, b) - at(a, b + 1)).abs();
-            }
+        let line = |f: &dyn Fn(usize) -> f32| (0..n).map(f).sum::<f32>() / n as f32;
+        let hs = line(&|a| (at(n - 1, a) - at(0, a)).abs());
+        let vs = line(&|a| (at(a, n - 1) - at(a, 0)).abs());
+        let (mut hi, mut vi) = (0.0f32, 0.0f32);
+        for b in 0..n - 1 {
+            hi = hi.max(line(&|a| (at(b, a) - at(b + 1, a)).abs()));
+            vi = vi.max(line(&|a| (at(a, b) - at(a, b + 1)).abs()));
         }
-        let (k, m) = (n as f32, (n * (n - 1)) as f32);
-        [(hs / k, hi / m), (vs / k, vi / m)]
+        [(hs, hi), (vs, vi)]
     }
 
     #[test]
@@ -1043,8 +1044,8 @@ mod tests {
                         ["horizontal", "vertical"].iter().zip(seams(data, N, ch))
                     {
                         assert!(
-                            seam <= inner * 2.0 + 1.5,
-                            "{kind:?} {name} channel {ch}: {dir} seam step {seam:.2} vs interior {inner:.2}"
+                            seam <= inner * 1.25 + 1.5,
+                            "{kind:?} {name} channel {ch}: {dir} seam step {seam:.2} vs worst interior line {inner:.2}"
                         );
                     }
                 }
@@ -1071,7 +1072,7 @@ mod tests {
     fn normal_maps_are_normalised() {
         for kind in [Kind::Paint, Kind::Metal, Kind::Rough, Kind::Terrain] {
             let m = build(kind, N);
-            for px in m.normal.chunks_exact(4) {
+            for px in m.normal.as_chunks::<4>().0 {
                 let v = [px[0], px[1], px[2]].map(|c| c as f32 / 255.0 * 2.0 - 1.0);
                 let len = length(v);
                 assert!((len - 1.0).abs() < 0.02, "{kind:?}: normal length {len}");
@@ -1087,7 +1088,7 @@ mod tests {
             let level0 = &m.orm[..N * N * 4];
             let avg = |ch: usize| {
                 level0
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .map(|p| p[ch] as f32 / 255.0)
                     .sum::<f32>()
                     / (N * N) as f32

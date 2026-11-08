@@ -56,10 +56,14 @@ impl Plugin for DebugPlugin {
                 move |mut queue: ResMut<crate::menu::MenuQueue>, mut n: Local<u32>| {
                     use crate::menu::{MenuAction as A, Page};
                     *n += 1;
+                    if *n == 8 && page == "mp-connect" {
+                        queue.0.push(A::MpConnect);
+                    }
                     if *n != 3 {
                         return;
                     }
                     match page.as_str() {
+                        "mp" | "mp-connect" => queue.0.push(A::Open(Page::Multiplayer)),
                         "new" => queue.0.push(A::Open(Page::NewGame)),
                         "load" => queue.0.push(A::Open(Page::Load)),
                         "settings" => queue.0.push(A::Open(Page::Settings)),
